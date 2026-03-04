@@ -65,8 +65,9 @@ def build_pipeline_string(rtsp_url: str, transport: str, decoder: str) -> str:
 
 
 class GstRtspCapture:
-    def __init__(self, rtsp_url: str) -> None:
+    def __init__(self, rtsp_url: str, preferred_transport: str = "tcp") -> None:
         self.rtsp_url = rtsp_url
+        self.preferred_transport = preferred_transport.lower()
         self.pipeline = None
         self.appsink = None
         self.bus = None
@@ -79,7 +80,7 @@ class GstRtspCapture:
         decoder = self._select_decoder()
         no_frame_seen = False
 
-        for transport in ("udp", "tcp"):
+        for transport in self._transport_attempt_order():
             self.stop()
             self._start_pipeline(transport, decoder)
             frame = self.read_latest(timeout_ms=STREAM_CONNECT_TIMEOUT_MS)
@@ -98,6 +99,13 @@ class GstRtspCapture:
         if no_frame_seen:
             raise RuntimeError("Connected but no video frames were received.")
         raise RuntimeError("Unable to open RTSP stream.")
+
+    def _transport_attempt_order(self):
+        if self.preferred_transport == "udp":
+            return ("udp", "tcp")
+        if self.preferred_transport == "auto":
+            return ("tcp", "udp")
+        return ("tcp", "udp")
 
     def read_latest(self, timeout_ms: int = FRAME_WAIT_TIMEOUT_MS):
         if self._prefetched_frame is not None:

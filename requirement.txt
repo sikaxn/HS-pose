@@ -1,0 +1,7 @@
+numpy
+opencv-python
+PyGObject
+PyQt5
+torch
+ultralytics
+yolov5

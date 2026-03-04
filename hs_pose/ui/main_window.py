@@ -1,7 +1,7 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from hs_pose.config import load_config, save_config
-from hs_pose.constants import DEFAULT_CONFIDENCE, MODEL_PATH
+from hs_pose.constants import DEFAULT_CONFIDENCE, DEFAULT_RTSP_TRANSPORT, MODEL_PATH
 from hs_pose.detector import YoloV5Detector
 from hs_pose.stream_worker import StreamWorker
 
@@ -34,6 +34,15 @@ class MainWindow(QtWidgets.QMainWindow):
         rtsp_label = QtWidgets.QLabel("RTSP URL")
         self.rtsp_input = QtWidgets.QLineEdit(self.config["rtsp_url"])
         self.rtsp_input.setPlaceholderText("rtsp://host:port/path")
+        transport_label = QtWidgets.QLabel("Transport")
+        self.transport_input = QtWidgets.QComboBox()
+        self.transport_input.addItem("TCP", "tcp")
+        self.transport_input.addItem("Auto", "auto")
+        self.transport_input.addItem("UDP", "udp")
+        selected_transport = self.config.get("transport", DEFAULT_RTSP_TRANSPORT)
+        selected_index = self.transport_input.findData(selected_transport)
+        if selected_index >= 0:
+            self.transport_input.setCurrentIndex(selected_index)
         confidence_label = QtWidgets.QLabel("Confidence")
         self.confidence_input = QtWidgets.QDoubleSpinBox()
         self.confidence_input.setRange(0.0, 1.0)
@@ -47,6 +56,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         controls_layout.addWidget(rtsp_label)
         controls_layout.addWidget(self.rtsp_input, 1)
+        controls_layout.addWidget(transport_label)
+        controls_layout.addWidget(self.transport_input)
         controls_layout.addWidget(confidence_label)
         controls_layout.addWidget(self.confidence_input)
         controls_layout.addWidget(self.start_button)
@@ -80,14 +91,16 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         confidence = self.confidence_input.value()
+        transport = self.transport_input.currentData() or DEFAULT_RTSP_TRANSPORT
         self.detector.set_confidence(confidence)
         self.config["rtsp_url"] = rtsp_url
         self.config["confidence"] = confidence
+        self.config["transport"] = transport
         save_config(self.config)
 
         self.stop_stream()
 
-        self.stream_worker = StreamWorker(rtsp_url, self.detector)
+        self.stream_worker = StreamWorker(rtsp_url, self.detector, transport=transport)
         self.stream_worker.frame_ready.connect(self.update_frame)
         self.stream_worker.status_changed.connect(self.status_label.setText)
         self.stream_worker.error_occurred.connect(self.handle_stream_error)

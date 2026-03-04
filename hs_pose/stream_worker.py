@@ -14,12 +14,12 @@ class StreamWorker(QtCore.QThread):
     status_changed = QtCore.pyqtSignal(str)
     error_occurred = QtCore.pyqtSignal(str)
 
-    def __init__(self, rtsp_url: str, detector) -> None:
+    def __init__(self, rtsp_url: str, detector, transport: str = "tcp") -> None:
         super().__init__()
         self.rtsp_url = rtsp_url
         self.detector = detector
         self.frame_buffer = LatestFrameBuffer()
-        self.capture = GstRtspCapture(rtsp_url)
+        self.capture = GstRtspCapture(rtsp_url, preferred_transport=transport)
         self._running = False
         self._capture_thread = None
         self._capture_fps = 0.0
