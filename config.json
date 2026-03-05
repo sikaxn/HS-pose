@@ -1,5 +1,14 @@
 {
   "rtsp_url": "rtsp://10.0.0.181:554/live/av0",
   "confidence": 0.45,
-  "transport": "tcp"
+  "transport": "tcp",
+  "game": {
+    "pixel_count": 250,
+    "charge_rate": 10.0,
+    "active_decay_rate": 10.0,
+    "idle_decay_rate": 1.0,
+    "idle_drain_enabled": false,
+    "takeover_decay_enabled": false,
+    "tick_hz": 60
+  }
 }

@@ -80,6 +80,7 @@ class YoloV5Detector:
         detections = results.xyxy[0].detach().cpu().numpy()
         annotated = frame.copy()
         shirt_detections = []
+        shirt_by_class = {}
         detected_items = []
 
         for x1, y1, x2, y2, confidence, class_id in detections:
@@ -96,6 +97,7 @@ class YoloV5Detector:
                     "color": color,
                 }
             )
+            shirt_by_class[class_name] = shirt_by_class.get(class_name, 0) + 1
             detected_items.append(label)
 
             cv2.rectangle(annotated, (x1_i, y1_i), (x2_i, y2_i), color, 2)
@@ -124,14 +126,24 @@ class YoloV5Detector:
                 cv2.LINE_AA,
             )
 
-        pose_count, waving_count = self._draw_pose_and_actions(
+        pose_count, waving_count, waving_by_class = self._draw_pose_and_actions(
             annotated, rgb_frame, shirt_detections
         )
         detected_items.append(f"Poses: {pose_count}")
         detected_items.append(f"Waving: {waving_count}")
-        return annotated, len(detections), pose_count, waving_count, detected_items
+        for class_name, count in sorted(waving_by_class.items()):
+            detected_items.append(f"Waving {class_name}: {count}")
+        return (
+            annotated,
+            len(detections),
+            pose_count,
+            waving_count,
+            detected_items,
+            waving_by_class,
+            shirt_by_class,
+        )
 
-    def _draw_pose_and_actions(self, annotated, rgb_frame, shirt_detections) -> tuple[int, int]:
+    def _draw_pose_and_actions(self, annotated, rgb_frame, shirt_detections) -> tuple[int, int, dict]:
         pose_results = self.pose_model.predict(
             source=rgb_frame,
             conf=self.confidence,
@@ -139,12 +151,12 @@ class YoloV5Detector:
             device=self.device,
         )
         if not pose_results:
-            return 0
+            return 0, 0, {}
 
         result = pose_results[0]
         keypoints = getattr(result, "keypoints", None)
         if keypoints is None or keypoints.xy is None:
-            return 0
+            return 0, 0, {}
 
         xy = keypoints.xy.detach().cpu().numpy()
         conf = None
@@ -168,8 +180,10 @@ class YoloV5Detector:
                     }
                 )
 
-        waving_count = self._annotate_person_waving(annotated, shirt_detections, people)
-        return person_count, waving_count
+        waving_count, waving_by_class = self._annotate_person_waving(
+            annotated, shirt_detections, people
+        )
+        return person_count, waving_count, waving_by_class
 
     def _draw_single_pose(self, annotated, points, point_conf) -> bool:
         visible_points = {}
@@ -199,9 +213,10 @@ class YoloV5Detector:
 
         return True
 
-    def _annotate_person_waving(self, annotated, shirt_detections, people) -> int:
+    def _annotate_person_waving(self, annotated, shirt_detections, people) -> tuple[int, dict]:
         self._prune_tracks()
         waving_count = 0
+        waving_by_class = {}
 
         for person in people:
             track = self._update_track(person)
@@ -220,6 +235,8 @@ class YoloV5Detector:
             else:
                 banner = f"{shirt_detection['class_name']} waving {hand_text}"
                 banner_color = shirt_detection["color"]
+                class_name = shirt_detection["class_name"]
+                waving_by_class[class_name] = waving_by_class.get(class_name, 0) + 1
             cv2.rectangle(
                 annotated,
                 (x1, max(y1 - 28, 0)),
@@ -238,7 +255,7 @@ class YoloV5Detector:
                 cv2.LINE_AA,
             )
 
-        return waving_count
+        return waving_count, waving_by_class
 
     def _match_shirt_to_person(self, person, shirt_detections):
         best_detection = None

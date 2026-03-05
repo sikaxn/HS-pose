@@ -12,6 +12,8 @@ from hs_pose.ui.image_utils import to_qimage_bgr
 class StreamWorker(QtCore.QThread):
     frame_ready = QtCore.pyqtSignal(QtGui.QImage)
     detected_changed = QtCore.pyqtSignal(str)
+    waving_classes_changed = QtCore.pyqtSignal(dict)
+    shirt_classes_changed = QtCore.pyqtSignal(dict)
     status_changed = QtCore.pyqtSignal(str)
     error_occurred = QtCore.pyqtSignal(str)
 
@@ -73,6 +75,8 @@ class StreamWorker(QtCore.QThread):
                     pose_count,
                     waving_count,
                     detected_items,
+                    waving_by_class,
+                    shirt_by_class,
                 ) = self.detector.infer(frame)
             except Exception as exc:
                 self.error_occurred.emit(f"Inference failed: {exc}")
@@ -81,6 +85,8 @@ class StreamWorker(QtCore.QThread):
             self._record_infer_frame()
             self.frame_ready.emit(to_qimage_bgr(annotated))
             self.detected_changed.emit("\n".join(detected_items) if detected_items else "No detections")
+            self.waving_classes_changed.emit(waving_by_class)
+            self.shirt_classes_changed.emit(shirt_by_class)
             self.status_changed.emit(
                 self._build_status(detection_count, pose_count, waving_count)
             )
