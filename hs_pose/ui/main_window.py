@@ -6,6 +6,8 @@ from hs_pose.config import load_config, save_config
 from hs_pose.constants import DEFAULT_CONFIDENCE, DEFAULT_RTSP_TRANSPORT, MODEL_PATH
 from hs_pose.detector import YoloV5Detector
 from hs_pose.energy_game import CLOTH_ORDER, EnergyGameEngine, GameParams
+from hs_pose.led_test_patterns import TEST_PALETTES, build_test_pixels
+from hs_pose.sacn_sender import SacnSender
 from hs_pose.stream_worker import StreamWorker
 from hs_pose.ui.led_strip_simulator import LedStripSimulatorWidget
 
@@ -24,13 +26,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.latest_waving_counts = {cloth: 0 for cloth in CLOTH_ORDER}
         self.latest_shirt_counts = {cloth: 0 for cloth in CLOTH_ORDER}
         self.energy_engine = EnergyGameEngine(self._game_params_from_config())
+        self.sacn_sender = SacnSender()
         self._game_timer = QtCore.QTimer(self)
         self._game_timer.timeout.connect(self._tick_game)
         self._last_game_tick = time.monotonic()
+        self._started_at = time.monotonic()
 
         self._build_ui()
         self._set_idle_frame()
         self._apply_game_params(save=False)
+        self._apply_output_params(save=False)
         self._game_timer.start()
         self.status_label.setText(
             f"Model: {MODEL_PATH.name} | Device: {self.detector.device_name} | "
@@ -171,6 +176,58 @@ class MainWindow(QtWidgets.QMainWindow):
 
         game_layout.addLayout(params_layout)
 
+        output_layout = QtWidgets.QHBoxLayout()
+        sacn_cfg = self.config.get("sacn", {})
+
+        self.sacn_enabled_input = QtWidgets.QCheckBox("Enable sACN (E1.31)")
+        self.sacn_enabled_input.setChecked(bool(sacn_cfg.get("enabled", False)))
+        self.sacn_ip_input = QtWidgets.QLineEdit(str(sacn_cfg.get("receiver_ip", "")))
+        self.sacn_ip_input.setPlaceholderText("sACN receiver IP")
+        self.sacn_universe_input = QtWidgets.QSpinBox()
+        self.sacn_universe_input.setRange(1, 63999)
+        self.sacn_universe_input.setValue(int(sacn_cfg.get("universe", 1)))
+        self.sacn_start_input = QtWidgets.QSpinBox()
+        self.sacn_start_input.setRange(1, 512)
+        self.sacn_start_input.setValue(int(sacn_cfg.get("start_address", 1)))
+        self.test_mode_enabled_input = QtWidgets.QCheckBox("LED Test Mode")
+        self.test_mode_enabled_input.setChecked(bool(sacn_cfg.get("test_mode_enabled", False)))
+        self.test_palette_input = QtWidgets.QComboBox()
+        for palette in TEST_PALETTES:
+            self.test_palette_input.addItem(palette)
+        selected_palette = str(sacn_cfg.get("test_palette", "Manual RGB"))
+        selected_palette_index = self.test_palette_input.findText(selected_palette)
+        if selected_palette_index >= 0:
+            self.test_palette_input.setCurrentIndex(selected_palette_index)
+
+        self.test_r_input = QtWidgets.QSpinBox()
+        self.test_r_input.setRange(0, 255)
+        self.test_r_input.setValue(int(sacn_cfg.get("test_r", 255)))
+        self.test_g_input = QtWidgets.QSpinBox()
+        self.test_g_input.setRange(0, 255)
+        self.test_g_input.setValue(int(sacn_cfg.get("test_g", 64)))
+        self.test_b_input = QtWidgets.QSpinBox()
+        self.test_b_input.setRange(0, 255)
+        self.test_b_input.setValue(int(sacn_cfg.get("test_b", 64)))
+
+        output_layout.addWidget(self.sacn_enabled_input)
+        output_layout.addWidget(QtWidgets.QLabel("Receiver IP"))
+        output_layout.addWidget(self.sacn_ip_input)
+        output_layout.addWidget(QtWidgets.QLabel("Universe"))
+        output_layout.addWidget(self.sacn_universe_input)
+        output_layout.addWidget(QtWidgets.QLabel("Start Addr"))
+        output_layout.addWidget(self.sacn_start_input)
+        output_layout.addWidget(self.test_mode_enabled_input)
+        output_layout.addWidget(QtWidgets.QLabel("Test Palette"))
+        output_layout.addWidget(self.test_palette_input)
+        output_layout.addWidget(QtWidgets.QLabel("R"))
+        output_layout.addWidget(self.test_r_input)
+        output_layout.addWidget(QtWidgets.QLabel("G"))
+        output_layout.addWidget(self.test_g_input)
+        output_layout.addWidget(QtWidgets.QLabel("B"))
+        output_layout.addWidget(self.test_b_input)
+        output_layout.addStretch(1)
+        game_layout.addLayout(output_layout)
+
         self.led_strip_widget = LedStripSimulatorWidget()
         game_layout.addWidget(self.led_strip_widget)
 
@@ -183,7 +240,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.start_button.clicked.connect(self.start_stream)
         self.stop_button.clicked.connect(self.stop_stream)
-        self.apply_game_button.clicked.connect(lambda: self._apply_game_params(save=True))
+        self.apply_game_button.clicked.connect(lambda: self._apply_all_settings(save=True))
         self.reset_energy_button.clicked.connect(self._reset_energy)
 
     def _set_idle_frame(self) -> None:
@@ -223,6 +280,27 @@ class MainWindow(QtWidgets.QMainWindow):
             "takeover_decay_enabled": params.takeover_decay_enabled,
             "tick_hz": tick_hz,
         }
+        if save:
+            save_config(self.config)
+
+    def _apply_output_params(self, save: bool) -> None:
+        self.config["sacn"] = {
+            "enabled": self.sacn_enabled_input.isChecked(),
+            "receiver_ip": self.sacn_ip_input.text().strip(),
+            "universe": int(self.sacn_universe_input.value()),
+            "start_address": int(self.sacn_start_input.value()),
+            "test_mode_enabled": self.test_mode_enabled_input.isChecked(),
+            "test_palette": self.test_palette_input.currentText(),
+            "test_r": int(self.test_r_input.value()),
+            "test_g": int(self.test_g_input.value()),
+            "test_b": int(self.test_b_input.value()),
+        }
+        if save:
+            save_config(self.config)
+
+    def _apply_all_settings(self, save: bool) -> None:
+        self._apply_game_params(save=False)
+        self._apply_output_params(save=False)
         if save:
             save_config(self.config)
 
@@ -268,13 +346,43 @@ class MainWindow(QtWidgets.QMainWindow):
         dt = max(0.0, now - self._last_game_tick)
         self._last_game_tick = now
 
-        pixels = self.energy_engine.update(
-            self.latest_waving_counts,
-            dt,
-            shirt_counts=self.latest_shirt_counts,
-        )
+        if self.test_mode_enabled_input.isChecked():
+            pixels = build_test_pixels(
+                pixel_count=int(self.pixel_count_input.value()),
+                palette=self.test_palette_input.currentText(),
+                manual_rgb=(
+                    int(self.test_r_input.value()),
+                    int(self.test_g_input.value()),
+                    int(self.test_b_input.value()),
+                ),
+                elapsed_seconds=max(0.0, now - self._started_at),
+            )
+        else:
+            pixels = self.energy_engine.update(
+                self.latest_waving_counts,
+                dt,
+                shirt_counts=self.latest_shirt_counts,
+            )
         self.led_strip_widget.set_pixels(pixels)
+        self._send_sacn_if_enabled(pixels)
         self._update_energy_status()
+
+    def _send_sacn_if_enabled(self, pixels) -> None:
+        if not self.sacn_enabled_input.isChecked():
+            return
+        ip = self.sacn_ip_input.text().strip()
+        if not ip:
+            return
+        try:
+            self.sacn_sender.send_pixels(
+                destination_ip=ip,
+                universe=int(self.sacn_universe_input.value()),
+                start_address=int(self.sacn_start_input.value()),
+                pixels=pixels,
+                source_name="HS Pose",
+            )
+        except OSError:
+            pass
 
     def _update_energy_status(self) -> None:
         energy = self.energy_engine.get_energy()
@@ -295,7 +403,7 @@ class MainWindow(QtWidgets.QMainWindow):
         confidence = self.confidence_input.value()
         transport = self.transport_input.currentData() or DEFAULT_RTSP_TRANSPORT
         self.detector.set_confidence(confidence)
-        self._apply_game_params(save=False)
+        self._apply_all_settings(save=False)
 
         self.config["rtsp_url"] = rtsp_url
         self.config["confidence"] = confidence
@@ -353,4 +461,5 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.stop_stream()
+        self.sacn_sender.close()
         super().closeEvent(event)

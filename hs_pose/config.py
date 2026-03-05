@@ -22,6 +22,17 @@ def load_config() -> dict:
             "takeover_decay_enabled": True,
             "tick_hz": 30,
         },
+        "sacn": {
+            "enabled": False,
+            "receiver_ip": "",
+            "universe": 1,
+            "start_address": 1,
+            "test_mode_enabled": False,
+            "test_palette": "Manual RGB",
+            "test_r": 255,
+            "test_g": 64,
+            "test_b": 64,
+        },
     }
     if not CONFIG_PATH.exists():
         return default_config
@@ -93,6 +104,40 @@ def load_config() -> dict:
             default_config["game"]["takeover_decay_enabled"],
         )
     )
+    sacn_data = data.get("sacn", {})
+    if not isinstance(sacn_data, dict):
+        sacn_data = {}
+    sacn_enabled = bool(sacn_data.get("enabled", default_config["sacn"]["enabled"]))
+    receiver_ip = str(sacn_data.get("receiver_ip", default_config["sacn"]["receiver_ip"]))
+    universe = _to_int(
+        sacn_data.get("universe", default_config["sacn"]["universe"]),
+        default_config["sacn"]["universe"],
+        1,
+    )
+    start_address = _to_int(
+        sacn_data.get("start_address", default_config["sacn"]["start_address"]),
+        default_config["sacn"]["start_address"],
+        1,
+    )
+    test_mode_enabled = bool(
+        sacn_data.get("test_mode_enabled", default_config["sacn"]["test_mode_enabled"])
+    )
+    test_palette = str(sacn_data.get("test_palette", default_config["sacn"]["test_palette"]))
+    test_r = _to_int(
+        sacn_data.get("test_r", default_config["sacn"]["test_r"]),
+        default_config["sacn"]["test_r"],
+        0,
+    )
+    test_g = _to_int(
+        sacn_data.get("test_g", default_config["sacn"]["test_g"]),
+        default_config["sacn"]["test_g"],
+        0,
+    )
+    test_b = _to_int(
+        sacn_data.get("test_b", default_config["sacn"]["test_b"]),
+        default_config["sacn"]["test_b"],
+        0,
+    )
 
     return {
         "rtsp_url": data.get("rtsp_url") or DEFAULT_RTSP_URL,
@@ -106,6 +151,17 @@ def load_config() -> dict:
             "idle_drain_enabled": idle_drain_enabled,
             "takeover_decay_enabled": takeover_decay_enabled,
             "tick_hz": tick_hz,
+        },
+        "sacn": {
+            "enabled": sacn_enabled,
+            "receiver_ip": receiver_ip,
+            "universe": min(63999, universe),
+            "start_address": min(512, start_address),
+            "test_mode_enabled": test_mode_enabled,
+            "test_palette": test_palette,
+            "test_r": min(255, test_r),
+            "test_g": min(255, test_g),
+            "test_b": min(255, test_b),
         },
     }
 

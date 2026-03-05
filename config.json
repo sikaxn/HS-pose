@@ -3,12 +3,23 @@
   "confidence": 0.45,
   "transport": "tcp",
   "game": {
-    "pixel_count": 250,
+    "pixel_count": 140,
     "charge_rate": 10.0,
     "active_decay_rate": 10.0,
-    "idle_decay_rate": 1.0,
-    "idle_drain_enabled": false,
+    "idle_decay_rate": 5.0,
+    "idle_drain_enabled": true,
     "takeover_decay_enabled": false,
     "tick_hz": 60
+  },
+  "sacn": {
+    "enabled": true,
+    "receiver_ip": "10.0.0.100",
+    "universe": 1,
+    "start_address": 1,
+    "test_mode_enabled": false,
+    "test_palette": "Color Wipe",
+    "test_r": 255,
+    "test_g": 255,
+    "test_b": 255
   }
 }
