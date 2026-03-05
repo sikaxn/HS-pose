@@ -80,6 +80,7 @@ class YoloV5Detector:
         detections = results.xyxy[0].detach().cpu().numpy()
         annotated = frame.copy()
         shirt_detections = []
+        detected_items = []
 
         for x1, y1, x2, y2, confidence, class_id in detections:
             x1_i, y1_i, x2_i, y2_i = map(int, [x1, y1, x2, y2])
@@ -95,6 +96,7 @@ class YoloV5Detector:
                     "color": color,
                 }
             )
+            detected_items.append(label)
 
             cv2.rectangle(annotated, (x1_i, y1_i), (x2_i, y2_i), color, 2)
             text_size, baseline = cv2.getTextSize(
@@ -125,7 +127,9 @@ class YoloV5Detector:
         pose_count, waving_count = self._draw_pose_and_actions(
             annotated, rgb_frame, shirt_detections
         )
-        return annotated, len(detections), pose_count, waving_count
+        detected_items.append(f"Poses: {pose_count}")
+        detected_items.append(f"Waving: {waving_count}")
+        return annotated, len(detections), pose_count, waving_count, detected_items
 
     def _draw_pose_and_actions(self, annotated, rgb_frame, shirt_detections) -> tuple[int, int]:
         pose_results = self.pose_model.predict(

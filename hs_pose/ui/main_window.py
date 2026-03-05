@@ -69,12 +69,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.video_label.setStyleSheet(
             "background-color: #111; color: #ddd; border: 1px solid #333;"
         )
+        self.detected_title = QtWidgets.QLabel("Detected")
+        self.detected_title.setStyleSheet("font-weight: 600; color: #ddd;")
+        self.detected_text = QtWidgets.QPlainTextEdit()
+        self.detected_text.setReadOnly(True)
+        self.detected_text.setMinimumWidth(260)
+        self.detected_text.setStyleSheet(
+            "background-color: #111; color: #ddd; border: 1px solid #333;"
+        )
+        self.detected_text.setPlainText("No detections")
 
         self.status_label = QtWidgets.QLabel("Idle")
         self.status_label.setStyleSheet("padding: 6px 0; color: #ddd;")
 
         main_layout.addLayout(controls_layout)
-        main_layout.addWidget(self.video_label, 1)
+        content_layout = QtWidgets.QHBoxLayout()
+        content_layout.addWidget(self.video_label, 1)
+        detected_layout = QtWidgets.QVBoxLayout()
+        detected_layout.addWidget(self.detected_title)
+        detected_layout.addWidget(self.detected_text, 1)
+        content_layout.addLayout(detected_layout)
+        main_layout.addLayout(content_layout, 1)
         main_layout.addWidget(self.status_label)
 
         self.start_button.clicked.connect(self.start_stream)
@@ -102,6 +117,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.stream_worker = StreamWorker(rtsp_url, self.detector, transport=transport)
         self.stream_worker.frame_ready.connect(self.update_frame)
+        self.stream_worker.detected_changed.connect(self.detected_text.setPlainText)
         self.stream_worker.status_changed.connect(self.status_label.setText)
         self.stream_worker.error_occurred.connect(self.handle_stream_error)
         self.stream_worker.finished.connect(self.on_stream_finished)
@@ -132,6 +148,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_stream_finished(self) -> None:
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self.detected_text.setPlainText("No detections")
         self.status_label.setText(
             f"Model: {MODEL_PATH.name} | Device: {self.detector.device_name} | "
             f"Confidence: {self.detector.confidence:.2f}"
