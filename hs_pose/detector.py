@@ -68,6 +68,12 @@ class YoloV5Detector:
         self.confidence = DEFAULT_CONFIDENCE
         self._tracks = {}
         self._next_track_id = 1
+        self._selected_pose_track_id = None
+
+    def set_selected_pose_track_id(self, track_id: int | None) -> None:
+        self._selected_pose_track_id = (
+            int(track_id) if track_id is not None else None
+        )
 
     def set_confidence(self, confidence: float) -> None:
         confidence = min(max(float(confidence), 0.0), 1.0)
@@ -126,7 +132,7 @@ class YoloV5Detector:
                 cv2.LINE_AA,
             )
 
-        pose_count, waving_count, waving_by_class = self._draw_pose_and_actions(
+        pose_count, waving_count, waving_by_class, pose_data = self._draw_pose_and_actions(
             annotated, rgb_frame, shirt_detections
         )
         detected_items.append(f"Poses: {pose_count}")
@@ -141,9 +147,10 @@ class YoloV5Detector:
             detected_items,
             waving_by_class,
             shirt_by_class,
+            pose_data,
         )
 
-    def _draw_pose_and_actions(self, annotated, rgb_frame, shirt_detections) -> tuple[int, int, dict]:
+    def _draw_pose_and_actions(self, annotated, rgb_frame, shirt_detections) -> tuple[int, int, dict, list]:
         pose_results = self.pose_model.predict(
             source=rgb_frame,
             conf=self.confidence,
@@ -151,12 +158,12 @@ class YoloV5Detector:
             device=self.device,
         )
         if not pose_results:
-            return 0, 0, {}
+            return 0, 0, {}, []
 
         result = pose_results[0]
         keypoints = getattr(result, "keypoints", None)
         if keypoints is None or keypoints.xy is None:
-            return 0, 0, {}
+            return 0, 0, {}, []
 
         xy = keypoints.xy.detach().cpu().numpy()
         conf = None
@@ -180,10 +187,10 @@ class YoloV5Detector:
                     }
                 )
 
-        waving_count, waving_by_class = self._annotate_person_waving(
+        waving_count, waving_by_class, pose_data = self._annotate_person_waving(
             annotated, shirt_detections, people
         )
-        return person_count, waving_count, waving_by_class
+        return person_count, waving_count, waving_by_class, pose_data
 
     def _draw_single_pose(self, annotated, points, point_conf) -> bool:
         visible_points = {}
@@ -213,13 +220,48 @@ class YoloV5Detector:
 
         return True
 
-    def _annotate_person_waving(self, annotated, shirt_detections, people) -> tuple[int, dict]:
+    def _annotate_person_waving(self, annotated, shirt_detections, people) -> tuple[int, dict, list]:
         self._prune_tracks()
         waving_count = 0
         waving_by_class = {}
+        pose_data = []
 
         for person in people:
-            track = self._update_track(person)
+            track_id, track = self._update_track(person)
+            person_box = person["bbox"]
+            x1, y1, x2, y2 = map(int, person_box)
+            center_x, center_y = self._bbox_center(person_box)
+            width = max(float(x2 - x1), 1.0)
+            height = max(float(y2 - y1), 1.0)
+            pose_data.append(
+                {
+                    "track_id": int(track_id),
+                    "bbox": [
+                        float(person_box[0]),
+                        float(person_box[1]),
+                        float(person_box[2]),
+                        float(person_box[3]),
+                    ],
+                    "center": [float(center_x), float(center_y)],
+                    "width": width,
+                    "height": height,
+                    "area": width * height,
+                }
+            )
+            pose_id_color = (0, 255, 255)
+            if self._selected_pose_track_id == track_id:
+                pose_id_color = (80, 255, 80)
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), pose_id_color, 2)
+            cv2.putText(
+                annotated,
+                f"Pose {track_id}",
+                (x1 + 2, max(y1 - 32, 16)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                pose_id_color,
+                2,
+                cv2.LINE_AA,
+            )
             left_waving, right_waving = self._update_wave_state(track, person)
             if not left_waving and not right_waving:
                 continue
@@ -227,8 +269,6 @@ class YoloV5Detector:
             waving_count += 1
             hand_text = self._wave_label(left_waving, right_waving)
             shirt_detection = self._match_shirt_to_person(person, shirt_detections)
-            person_box = person["bbox"]
-            x1, y1, x2, _y2 = map(int, person_box)
             if shirt_detection is None:
                 banner = f"Waving {hand_text}"
                 banner_color = (0, 200, 255)
@@ -255,7 +295,7 @@ class YoloV5Detector:
                 cv2.LINE_AA,
             )
 
-        return waving_count, waving_by_class
+        return waving_count, waving_by_class, pose_data
 
     def _match_shirt_to_person(self, person, shirt_detections):
         best_detection = None
@@ -274,7 +314,7 @@ class YoloV5Detector:
 
         return best_detection
 
-    def _update_track(self, person) -> dict:
+    def _update_track(self, person) -> tuple[int, dict]:
         center_x, center_y = self._bbox_center(person["bbox"])
         box_width = max(person["bbox"][2] - person["bbox"][0], 1.0)
         box_height = max(person["bbox"][3] - person["bbox"][1], 1.0)
@@ -303,7 +343,7 @@ class YoloV5Detector:
         track["center_y"] = center_y
         track["last_seen"] = time.monotonic()
         track["person_bbox"] = person["bbox"]
-        return track
+        return best_track_id, track
 
     def _update_wave_state(self, track, person) -> tuple[bool, bool]:
         points = person["points"]

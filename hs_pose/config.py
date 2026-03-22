@@ -39,6 +39,11 @@ def load_config() -> dict:
             "port": DEFAULT_VISCA_PORT,
             "ptz_speed": 8,
             "zoom_speed": 2,
+            "auto_track": {
+                "enabled": False,
+                "use_zoom": False,
+                "sensitivity": 50,
+            },
         },
     }
     if not CONFIG_PATH.exists():
@@ -164,6 +169,26 @@ def load_config() -> dict:
         default_config["visca"]["zoom_speed"],
         0,
     )
+    auto_track_data = visca_data.get("auto_track", {})
+    if not isinstance(auto_track_data, dict):
+        auto_track_data = {}
+    auto_track_enabled = bool(
+        auto_track_data.get(
+            "enabled", default_config["visca"]["auto_track"]["enabled"]
+        )
+    )
+    auto_track_use_zoom = bool(
+        auto_track_data.get(
+            "use_zoom", default_config["visca"]["auto_track"]["use_zoom"]
+        )
+    )
+    auto_track_sensitivity = _to_int(
+        auto_track_data.get(
+            "sensitivity", default_config["visca"]["auto_track"]["sensitivity"]
+        ),
+        default_config["visca"]["auto_track"]["sensitivity"],
+        1,
+    )
 
     return {
         "rtsp_url": data.get("rtsp_url") or DEFAULT_RTSP_URL,
@@ -194,6 +219,11 @@ def load_config() -> dict:
             "port": min(65535, visca_port),
             "ptz_speed": min(24, visca_ptz_speed),
             "zoom_speed": min(7, visca_zoom_speed),
+            "auto_track": {
+                "enabled": auto_track_enabled,
+                "use_zoom": auto_track_use_zoom,
+                "sensitivity": min(100, auto_track_sensitivity),
+            },
         },
     }
 

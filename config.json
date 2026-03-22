@@ -26,6 +26,11 @@
     "address": "10.0.0.181",
     "port": 52381,
     "ptz_speed": 16,
-    "zoom_speed": 2
+    "zoom_speed": 2,
+    "auto_track": {
+      "enabled": false,
+      "use_zoom": true,
+      "sensitivity": 83
+    }
   }
 }

@@ -3,6 +3,7 @@ from urllib.parse import urlparse
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from hs_pose.auto_tracker import AutoTracker
 from hs_pose.config import load_config, save_config
 from hs_pose.constants import (
     DEFAULT_CONFIDENCE,
@@ -17,6 +18,17 @@ from hs_pose.sacn_sender import SacnSender
 from hs_pose.stream_worker import StreamWorker
 from hs_pose.ui.led_strip_simulator import LedStripSimulatorWidget
 from hs_pose.visca_over_ip import ViscaOverIpClient
+
+
+class VideoLabel(QtWidgets.QLabel):
+    clicked = QtCore.pyqtSignal(QtCore.QPoint)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.LeftButton:
+            self.clicked.emit(event.pos())
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -39,9 +51,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._visca_status_timer = QtCore.QTimer(self)
         self._visca_status_timer.timeout.connect(self._refresh_visca_status_auto)
         self._visca_status_busy = False
+        self._auto_track_timer = QtCore.QTimer(self)
+        self._auto_track_timer.timeout.connect(self._auto_track_tick)
         self._last_game_tick = time.monotonic()
         self._started_at = time.monotonic()
         self._last_visca_status_refresh = 0.0
+        self.auto_tracker = AutoTracker(
+            detector=self.detector,
+            visca_client_factory=lambda timeout: self._visca_client(
+                warn_if_missing=False,
+                timeout_seconds=timeout,
+            ),
+        )
 
         self._build_ui()
         self._set_idle_frame()
@@ -49,6 +70,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_output_params(save=False)
         self._game_timer.start()
         self._visca_status_timer.start(100)
+        self._auto_track_timer.start(180)
         self.status_label.setText(
             f"Model: {MODEL_PATH.name} | Device: {self.detector.device_name} | "
             f"Confidence: {self.detector.confidence:.2f}"
@@ -121,6 +143,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zoom_speed_slider.setRange(0, 7)
         self.zoom_speed_slider.setValue(int(visca_cfg.get("zoom_speed", 2)))
         self.zoom_speed_value = QtWidgets.QLabel(str(self.zoom_speed_slider.value()))
+        auto_track_cfg = visca_cfg.get("auto_track", {})
+        if not isinstance(auto_track_cfg, dict):
+            auto_track_cfg = {}
 
         self.ptz_pad_widget = QtWidgets.QWidget()
         ptz_pad_layout = QtWidgets.QGridLayout(self.ptz_pad_widget)
@@ -180,6 +205,44 @@ class MainWindow(QtWidgets.QMainWindow):
         visca_status_layout.addLayout(visca_status_controls)
         visca_status_layout.addWidget(self.visca_status_text)
 
+        auto_track_group = QtWidgets.QGroupBox("Auto Track")
+        auto_track_layout = QtWidgets.QVBoxLayout(auto_track_group)
+        auto_track_layout.setContentsMargins(8, 8, 8, 8)
+        auto_track_controls = QtWidgets.QHBoxLayout()
+        self.auto_track_toggle_button = QtWidgets.QPushButton("Off")
+        self.auto_track_toggle_button.setCheckable(True)
+        self.auto_track_toggle_button.setChecked(
+            bool(auto_track_cfg.get("enabled", False))
+        )
+        self.auto_track_use_zoom_input = QtWidgets.QCheckBox("Use Zoom")
+        self.auto_track_use_zoom_input.setChecked(
+            bool(auto_track_cfg.get("use_zoom", False))
+        )
+        auto_track_controls.addWidget(QtWidgets.QLabel("Track"))
+        auto_track_controls.addWidget(self.auto_track_toggle_button)
+        auto_track_controls.addWidget(self.auto_track_use_zoom_input)
+        auto_track_controls.addStretch(1)
+
+        sensitivity_row = QtWidgets.QHBoxLayout()
+        self.auto_track_sensitivity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.auto_track_sensitivity_slider.setRange(1, 100)
+        self.auto_track_sensitivity_slider.setValue(
+            int(auto_track_cfg.get("sensitivity", 50))
+        )
+        self.auto_track_sensitivity_value = QtWidgets.QLabel(
+            str(self.auto_track_sensitivity_slider.value())
+        )
+        sensitivity_row.addWidget(QtWidgets.QLabel("Sensitivity"))
+        sensitivity_row.addWidget(self.auto_track_sensitivity_slider, 1)
+        sensitivity_row.addWidget(self.auto_track_sensitivity_value)
+
+        self.auto_track_status_label = QtWidgets.QLabel("Click a pose to select target.")
+        self.auto_track_status_label.setStyleSheet("color: #000;")
+        self.auto_track_status_label.setWordWrap(True)
+        auto_track_layout.addLayout(auto_track_controls)
+        auto_track_layout.addLayout(sensitivity_row)
+        auto_track_layout.addWidget(self.auto_track_status_label)
+
         visca_layout.addWidget(QtWidgets.QLabel("VISCA IP"))
         visca_layout.addWidget(self.visca_address_input, 1)
         visca_layout.addWidget(self.use_camera_button)
@@ -187,7 +250,7 @@ class MainWindow(QtWidgets.QMainWindow):
         visca_layout.addWidget(self.visca_port_input)
         visca_layout.addStretch(1)
 
-        self.video_label = QtWidgets.QLabel()
+        self.video_label = VideoLabel()
         self.video_label.setAlignment(QtCore.Qt.AlignCenter)
         self.video_label.setMinimumSize(960, 540)
         self.video_label.setStyleSheet(
@@ -216,6 +279,7 @@ class MainWindow(QtWidgets.QMainWindow):
         detected_layout.addWidget(self.ptz_pad_widget)
         detected_layout.addWidget(speed_widget)
         detected_layout.addWidget(visca_status_group)
+        detected_layout.addWidget(auto_track_group)
         detected_layout.addWidget(self.detected_title)
         detected_layout.addWidget(self.detected_text, 1)
         content_layout.addLayout(detected_layout)
@@ -354,22 +418,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.use_camera_button.clicked.connect(self._use_camera_for_visca)
         self.home_button.clicked.connect(self._visca_home)
 
-        self.ptz_up_button.pressed.connect(lambda: self._visca_send_move("up"))
-        self.ptz_up_button.released.connect(self._visca_stop_pan_tilt)
-        self.ptz_down_button.pressed.connect(lambda: self._visca_send_move("down"))
-        self.ptz_down_button.released.connect(self._visca_stop_pan_tilt)
-        self.ptz_left_button.pressed.connect(lambda: self._visca_send_move("left"))
-        self.ptz_left_button.released.connect(self._visca_stop_pan_tilt)
-        self.ptz_right_button.pressed.connect(lambda: self._visca_send_move("right"))
-        self.ptz_right_button.released.connect(self._visca_stop_pan_tilt)
-        self.zoom_in_button.pressed.connect(lambda: self._visca_send_move("zoom_in"))
-        self.zoom_in_button.released.connect(self._visca_stop_zoom)
-        self.zoom_out_button.pressed.connect(lambda: self._visca_send_move("zoom_out"))
-        self.zoom_out_button.released.connect(self._visca_stop_zoom)
-        self.focus_in_button.pressed.connect(lambda: self._visca_send_move("focus_in"))
-        self.focus_in_button.released.connect(self._visca_stop_focus)
-        self.focus_out_button.pressed.connect(lambda: self._visca_send_move("focus_out"))
-        self.focus_out_button.released.connect(self._visca_stop_focus)
+        self.ptz_up_button.pressed.connect(lambda: self._manual_move_pressed("up"))
+        self.ptz_up_button.released.connect(self._manual_pan_tilt_released)
+        self.ptz_down_button.pressed.connect(lambda: self._manual_move_pressed("down"))
+        self.ptz_down_button.released.connect(self._manual_pan_tilt_released)
+        self.ptz_left_button.pressed.connect(lambda: self._manual_move_pressed("left"))
+        self.ptz_left_button.released.connect(self._manual_pan_tilt_released)
+        self.ptz_right_button.pressed.connect(lambda: self._manual_move_pressed("right"))
+        self.ptz_right_button.released.connect(self._manual_pan_tilt_released)
+        self.zoom_in_button.pressed.connect(lambda: self._manual_move_pressed("zoom_in"))
+        self.zoom_in_button.released.connect(self._manual_zoom_released)
+        self.zoom_out_button.pressed.connect(lambda: self._manual_move_pressed("zoom_out"))
+        self.zoom_out_button.released.connect(self._manual_zoom_released)
+        self.focus_in_button.pressed.connect(lambda: self._manual_move_pressed("focus_in"))
+        self.focus_in_button.released.connect(self._manual_focus_released)
+        self.focus_out_button.pressed.connect(lambda: self._manual_move_pressed("focus_out"))
+        self.focus_out_button.released.connect(self._manual_focus_released)
         self.autofocus_button.clicked.connect(self._visca_autofocus)
         self.ptz_speed_slider.valueChanged.connect(
             lambda value: self.ptz_speed_value.setText(str(value))
@@ -386,10 +450,93 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_visca_status_button.clicked.connect(
             lambda: self._refresh_visca_status(warn_if_missing=True, save_settings=True)
         )
+        self.video_label.clicked.connect(self._on_video_clicked)
+        self.auto_track_toggle_button.toggled.connect(self._on_auto_track_toggled)
+        self.auto_track_use_zoom_input.toggled.connect(
+            lambda _checked: self._apply_visca_params(save=True)
+        )
+        self.auto_track_sensitivity_slider.valueChanged.connect(
+            self._on_auto_track_sensitivity_changed
+        )
+        self.auto_track_sensitivity_slider.sliderReleased.connect(
+            lambda: self._apply_visca_params(save=True)
+        )
+        self.auto_track_toggle_button.setText(
+            "On" if self.auto_track_toggle_button.isChecked() else "Off"
+        )
+        self._update_auto_track_status()
+
+    def _on_auto_track_sensitivity_changed(self, value: int) -> None:
+        self.auto_track_sensitivity_value.setText(str(int(value)))
+        self._apply_visca_params(save=False)
+
+    def _manual_move_pressed(self, direction: str) -> None:
+        if self.auto_track_toggle_button.isChecked():
+            self.auto_tracker.begin_manual_override()
+            self._update_auto_track_status()
+        self._visca_send_move(direction)
+
+    def _manual_pan_tilt_released(self) -> None:
+        self._visca_stop_pan_tilt()
+        if self.auto_track_toggle_button.isChecked():
+            self.auto_tracker.end_manual_override()
+            self._update_auto_track_status()
+
+    def _manual_zoom_released(self) -> None:
+        self._visca_stop_zoom()
+        if self.auto_track_toggle_button.isChecked():
+            self.auto_tracker.end_manual_override()
+            self._update_auto_track_status()
+
+    def _manual_focus_released(self) -> None:
+        self._visca_stop_focus()
+        if self.auto_track_toggle_button.isChecked():
+            self.auto_tracker.end_manual_override()
+            self._update_auto_track_status()
+
+    def _on_auto_track_toggled(self, enabled: bool) -> None:
+        self.auto_track_toggle_button.setText("On" if enabled else "Off")
+        if not enabled:
+            self.auto_tracker.stop_motion(ptz_speed=int(self.ptz_speed_slider.value()))
+        self._apply_visca_params(save=True)
+        self._update_auto_track_status()
+
+    def _on_pose_data_changed(self, pose_data: object) -> None:
+        self.auto_tracker.update_pose_data(pose_data)
+        self._update_auto_track_status()
+
+    def _on_video_clicked(self, point: QtCore.QPoint) -> None:
+        status_text = self.auto_tracker.select_from_click(point)
+        if status_text:
+            self.auto_track_status_label.setText(status_text)
+        else:
+            self._update_auto_track_status()
+
+    def _auto_track_tick(self) -> None:
+        status_text = self.auto_tracker.tick(
+            enabled=self.auto_track_toggle_button.isChecked(),
+            use_zoom=self.auto_track_use_zoom_input.isChecked(),
+            sensitivity=int(self.auto_track_sensitivity_slider.value()),
+            ptz_speed=int(self.ptz_speed_slider.value()),
+            zoom_speed_limit=int(self.zoom_speed_slider.value()),
+        )
+        if status_text:
+            self.auto_track_status_label.setText(status_text)
+
+    def _update_auto_track_status(self, extra_text: str | None = None) -> None:
+        if extra_text:
+            self.auto_track_status_label.setText(extra_text)
+            return
+        self.auto_track_status_label.setText(
+            self.auto_tracker.build_status_text(
+                enabled=self.auto_track_toggle_button.isChecked()
+            )
+        )
 
     def _set_idle_frame(self) -> None:
         self.video_label.setText("No video")
         self.video_label.setPixmap(QtGui.QPixmap())
+        self.auto_tracker.set_frame_mapping(QtCore.QSize(), QtCore.QRect())
 
     def _game_params_from_config(self) -> GameParams:
         game_cfg = self.config.get("game", {})
@@ -443,11 +590,17 @@ class MainWindow(QtWidgets.QMainWindow):
             save_config(self.config)
 
     def _apply_visca_params(self, save: bool) -> None:
+        sensitivity = int(self.auto_track_sensitivity_slider.value())
         self.config["visca"] = {
             "address": self.visca_address_input.text().strip(),
             "port": int(self.visca_port_input.value()),
             "ptz_speed": int(self.ptz_speed_slider.value()),
             "zoom_speed": int(self.zoom_speed_slider.value()),
+            "auto_track": {
+                "enabled": self.auto_track_toggle_button.isChecked(),
+                "use_zoom": self.auto_track_use_zoom_input.isChecked(),
+                "sensitivity": sensitivity,
+            },
         }
         if save:
             save_config(self.config)
@@ -725,6 +878,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stream_worker = StreamWorker(rtsp_url, self.detector, transport=transport)
         self.stream_worker.frame_ready.connect(self.update_frame)
         self.stream_worker.detected_changed.connect(self.detected_text.setPlainText)
+        self.stream_worker.pose_data_changed.connect(self._on_pose_data_changed)
         self.stream_worker.waving_classes_changed.connect(self._on_waving_classes_changed)
         self.stream_worker.shirt_classes_changed.connect(self._on_shirt_classes_changed)
         self.stream_worker.status_changed.connect(self.status_label.setText)
@@ -738,6 +892,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def stop_stream(self) -> None:
         self.latest_waving_counts = {cloth: 0 for cloth in CLOTH_ORDER}
         self.latest_shirt_counts = {cloth: 0 for cloth in CLOTH_ORDER}
+        self.auto_tracker.clear_selection()
+        self._update_auto_track_status()
+        self.auto_tracker.stop_motion(ptz_speed=int(self.ptz_speed_slider.value()))
         if self.stream_worker and self.stream_worker.isRunning():
             self.stream_worker.stop()
 
@@ -749,6 +906,18 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.Qt.SmoothTransformation,
         )
         self.video_label.setPixmap(scaled)
+        content = self.video_label.contentsRect()
+        x_offset = content.x() + max(0, (content.width() - scaled.width()) // 2)
+        y_offset = content.y() + max(0, (content.height() - scaled.height()) // 2)
+        self.auto_tracker.set_frame_mapping(
+            image.size(),
+            QtCore.QRect(
+                x_offset,
+                y_offset,
+                scaled.width(),
+                scaled.height(),
+            ),
+        )
 
     def handle_stream_error(self, message: str) -> None:
         self.status_label.setText(message)
@@ -761,6 +930,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_button.setEnabled(False)
         self.latest_waving_counts = {cloth: 0 for cloth in CLOTH_ORDER}
         self.latest_shirt_counts = {cloth: 0 for cloth in CLOTH_ORDER}
+        self.auto_tracker.clear_selection()
+        self._update_auto_track_status()
         self.detected_text.setPlainText("No detections")
         self.status_label.setText(
             f"Model: {MODEL_PATH.name} | Device: {self.detector.device_name} | "
