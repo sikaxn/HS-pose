@@ -7,6 +7,7 @@ MODEL_PATH = BASE_DIR / "ISAhs_weight" / "weights" / "best.pt"
 POSE_MODEL_PATH = BASE_DIR / "yolov8n-pose.pt"
 DEFAULT_RTSP_URL = "rtsp://10.0.0.181:554/live/av0"
 DEFAULT_RTSP_TRANSPORT = "tcp"
+DEFAULT_VISCA_PORT = 52381
 
 DEFAULT_CONFIDENCE = 0.25
 DEFAULT_IOU = 0.45

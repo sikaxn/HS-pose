@@ -1,15 +1,22 @@
 import time
+from urllib.parse import urlparse
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from hs_pose.config import load_config, save_config
-from hs_pose.constants import DEFAULT_CONFIDENCE, DEFAULT_RTSP_TRANSPORT, MODEL_PATH
+from hs_pose.constants import (
+    DEFAULT_CONFIDENCE,
+    DEFAULT_RTSP_TRANSPORT,
+    DEFAULT_VISCA_PORT,
+    MODEL_PATH,
+)
 from hs_pose.detector import YoloV5Detector
 from hs_pose.energy_game import CLOTH_ORDER, EnergyGameEngine, GameParams
 from hs_pose.led_test_patterns import TEST_PALETTES, build_test_pixels
 from hs_pose.sacn_sender import SacnSender
 from hs_pose.stream_worker import StreamWorker
 from hs_pose.ui.led_strip_simulator import LedStripSimulatorWidget
+from hs_pose.visca_over_ip import ViscaOverIpClient
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -29,14 +36,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sacn_sender = SacnSender()
         self._game_timer = QtCore.QTimer(self)
         self._game_timer.timeout.connect(self._tick_game)
+        self._visca_status_timer = QtCore.QTimer(self)
+        self._visca_status_timer.timeout.connect(self._refresh_visca_status_auto)
+        self._visca_status_busy = False
         self._last_game_tick = time.monotonic()
         self._started_at = time.monotonic()
+        self._last_visca_status_refresh = 0.0
 
         self._build_ui()
         self._set_idle_frame()
         self._apply_game_params(save=False)
         self._apply_output_params(save=False)
         self._game_timer.start()
+        self._visca_status_timer.start(100)
         self.status_label.setText(
             f"Model: {MODEL_PATH.name} | Device: {self.detector.device_name} | "
             f"Confidence: {self.detector.confidence:.2f}"
@@ -48,6 +60,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         main_layout = QtWidgets.QVBoxLayout(central_widget)
         controls_layout = QtWidgets.QHBoxLayout()
+        visca_layout = QtWidgets.QHBoxLayout()
 
         rtsp_label = QtWidgets.QLabel("RTSP URL")
         self.rtsp_input = QtWidgets.QLineEdit(self.config["rtsp_url"])
@@ -82,6 +95,98 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(self.start_button)
         controls_layout.addWidget(self.stop_button)
 
+        visca_cfg = self.config.get("visca", {})
+        self.visca_address_input = QtWidgets.QLineEdit(str(visca_cfg.get("address", "")))
+        self.visca_address_input.setPlaceholderText("VISCA-over-IP camera address")
+        self.use_camera_button = QtWidgets.QPushButton("Use Camera")
+        self.visca_port_input = QtWidgets.QSpinBox()
+        self.visca_port_input.setRange(1, 65535)
+        self.visca_port_input.setValue(int(visca_cfg.get("port", DEFAULT_VISCA_PORT)))
+
+        self.ptz_up_button = QtWidgets.QPushButton("Up")
+        self.ptz_down_button = QtWidgets.QPushButton("Down")
+        self.ptz_left_button = QtWidgets.QPushButton("Left")
+        self.ptz_right_button = QtWidgets.QPushButton("Right")
+        self.zoom_in_button = QtWidgets.QPushButton("Zoom +")
+        self.zoom_out_button = QtWidgets.QPushButton("Zoom -")
+        self.focus_in_button = QtWidgets.QPushButton("Focus +")
+        self.focus_out_button = QtWidgets.QPushButton("Focus -")
+        self.autofocus_button = QtWidgets.QPushButton("AF")
+        self.home_button = QtWidgets.QPushButton("Home")
+        self.ptz_speed_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.ptz_speed_slider.setRange(1, 24)
+        self.ptz_speed_slider.setValue(int(visca_cfg.get("ptz_speed", 8)))
+        self.ptz_speed_value = QtWidgets.QLabel(str(self.ptz_speed_slider.value()))
+        self.zoom_speed_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.zoom_speed_slider.setRange(0, 7)
+        self.zoom_speed_slider.setValue(int(visca_cfg.get("zoom_speed", 2)))
+        self.zoom_speed_value = QtWidgets.QLabel(str(self.zoom_speed_slider.value()))
+
+        self.ptz_pad_widget = QtWidgets.QWidget()
+        ptz_pad_layout = QtWidgets.QGridLayout(self.ptz_pad_widget)
+        ptz_pad_layout.setContentsMargins(0, 0, 0, 0)
+        ptz_pad_layout.setHorizontalSpacing(4)
+        ptz_pad_layout.setVerticalSpacing(4)
+        ptz_pad_layout.addWidget(self.zoom_out_button, 0, 0)
+        ptz_pad_layout.addWidget(self.ptz_up_button, 0, 1)
+        ptz_pad_layout.addWidget(self.zoom_in_button, 0, 2)
+        ptz_pad_layout.addWidget(self.ptz_left_button, 1, 0)
+        ptz_pad_layout.addWidget(self.home_button, 1, 1)
+        ptz_pad_layout.addWidget(self.ptz_right_button, 1, 2)
+        ptz_pad_layout.addWidget(self.focus_out_button, 2, 0)
+        ptz_pad_layout.addWidget(self.ptz_down_button, 2, 1)
+        ptz_pad_layout.addWidget(self.focus_in_button, 2, 2)
+        ptz_pad_layout.addWidget(self.autofocus_button, 3, 1)
+
+        speed_widget = QtWidgets.QWidget()
+        speed_layout = QtWidgets.QHBoxLayout(speed_widget)
+        speed_layout.setContentsMargins(0, 4, 0, 0)
+        speed_layout.setSpacing(8)
+
+        ptz_speed_box = QtWidgets.QVBoxLayout()
+        ptz_speed_title = QtWidgets.QLabel("PTZ Speed")
+        ptz_speed_title.setAlignment(QtCore.Qt.AlignCenter)
+        ptz_speed_box.addWidget(ptz_speed_title)
+        ptz_speed_row = QtWidgets.QHBoxLayout()
+        ptz_speed_row.addWidget(self.ptz_speed_slider, 1)
+        ptz_speed_row.addWidget(self.ptz_speed_value)
+        ptz_speed_box.addLayout(ptz_speed_row)
+
+        zoom_speed_box = QtWidgets.QVBoxLayout()
+        zoom_speed_title = QtWidgets.QLabel("Zoom Speed")
+        zoom_speed_title.setAlignment(QtCore.Qt.AlignCenter)
+        zoom_speed_box.addWidget(zoom_speed_title)
+        zoom_speed_row = QtWidgets.QHBoxLayout()
+        zoom_speed_row.addWidget(self.zoom_speed_slider, 1)
+        zoom_speed_row.addWidget(self.zoom_speed_value)
+        zoom_speed_box.addLayout(zoom_speed_row)
+
+        speed_layout.addLayout(ptz_speed_box, 1)
+        speed_layout.addLayout(zoom_speed_box, 1)
+
+        visca_status_group = QtWidgets.QGroupBox("VISCA Status")
+        visca_status_layout = QtWidgets.QVBoxLayout(visca_status_group)
+        visca_status_layout.setContentsMargins(8, 8, 8, 8)
+        visca_status_controls = QtWidgets.QHBoxLayout()
+        self.refresh_visca_status_button = QtWidgets.QPushButton("Refresh")
+        self.visca_status_time_label = QtWidgets.QLabel("Not updated")
+        visca_status_controls.addWidget(self.refresh_visca_status_button)
+        visca_status_controls.addWidget(self.visca_status_time_label)
+        visca_status_controls.addStretch(1)
+        self.visca_status_text = QtWidgets.QPlainTextEdit()
+        self.visca_status_text.setReadOnly(True)
+        self.visca_status_text.setMaximumHeight(92)
+        self.visca_status_text.setPlainText("No status yet")
+        visca_status_layout.addLayout(visca_status_controls)
+        visca_status_layout.addWidget(self.visca_status_text)
+
+        visca_layout.addWidget(QtWidgets.QLabel("VISCA IP"))
+        visca_layout.addWidget(self.visca_address_input, 1)
+        visca_layout.addWidget(self.use_camera_button)
+        visca_layout.addWidget(QtWidgets.QLabel("Port"))
+        visca_layout.addWidget(self.visca_port_input)
+        visca_layout.addStretch(1)
+
         self.video_label = QtWidgets.QLabel()
         self.video_label.setAlignment(QtCore.Qt.AlignCenter)
         self.video_label.setMinimumSize(960, 540)
@@ -103,10 +208,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label.setStyleSheet("padding: 6px 0; color: #000;")
 
         main_layout.addLayout(controls_layout)
+        main_layout.addLayout(visca_layout)
 
         content_layout = QtWidgets.QHBoxLayout()
         content_layout.addWidget(self.video_label, 1)
         detected_layout = QtWidgets.QVBoxLayout()
+        detected_layout.addWidget(self.ptz_pad_widget)
+        detected_layout.addWidget(speed_widget)
+        detected_layout.addWidget(visca_status_group)
         detected_layout.addWidget(self.detected_title)
         detected_layout.addWidget(self.detected_text, 1)
         content_layout.addLayout(detected_layout)
@@ -242,6 +351,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_button.clicked.connect(self.stop_stream)
         self.apply_game_button.clicked.connect(lambda: self._apply_all_settings(save=True))
         self.reset_energy_button.clicked.connect(self._reset_energy)
+        self.use_camera_button.clicked.connect(self._use_camera_for_visca)
+        self.home_button.clicked.connect(self._visca_home)
+
+        self.ptz_up_button.pressed.connect(lambda: self._visca_send_move("up"))
+        self.ptz_up_button.released.connect(self._visca_stop_pan_tilt)
+        self.ptz_down_button.pressed.connect(lambda: self._visca_send_move("down"))
+        self.ptz_down_button.released.connect(self._visca_stop_pan_tilt)
+        self.ptz_left_button.pressed.connect(lambda: self._visca_send_move("left"))
+        self.ptz_left_button.released.connect(self._visca_stop_pan_tilt)
+        self.ptz_right_button.pressed.connect(lambda: self._visca_send_move("right"))
+        self.ptz_right_button.released.connect(self._visca_stop_pan_tilt)
+        self.zoom_in_button.pressed.connect(lambda: self._visca_send_move("zoom_in"))
+        self.zoom_in_button.released.connect(self._visca_stop_zoom)
+        self.zoom_out_button.pressed.connect(lambda: self._visca_send_move("zoom_out"))
+        self.zoom_out_button.released.connect(self._visca_stop_zoom)
+        self.focus_in_button.pressed.connect(lambda: self._visca_send_move("focus_in"))
+        self.focus_in_button.released.connect(self._visca_stop_focus)
+        self.focus_out_button.pressed.connect(lambda: self._visca_send_move("focus_out"))
+        self.focus_out_button.released.connect(self._visca_stop_focus)
+        self.autofocus_button.clicked.connect(self._visca_autofocus)
+        self.ptz_speed_slider.valueChanged.connect(
+            lambda value: self.ptz_speed_value.setText(str(value))
+        )
+        self.zoom_speed_slider.valueChanged.connect(
+            lambda value: self.zoom_speed_value.setText(str(value))
+        )
+        self.ptz_speed_slider.sliderReleased.connect(
+            lambda: self._apply_visca_params(save=True)
+        )
+        self.zoom_speed_slider.sliderReleased.connect(
+            lambda: self._apply_visca_params(save=True)
+        )
+        self.refresh_visca_status_button.clicked.connect(
+            lambda: self._refresh_visca_status(warn_if_missing=True, save_settings=True)
+        )
 
     def _set_idle_frame(self) -> None:
         self.video_label.setText("No video")
@@ -298,11 +442,177 @@ class MainWindow(QtWidgets.QMainWindow):
         if save:
             save_config(self.config)
 
+    def _apply_visca_params(self, save: bool) -> None:
+        self.config["visca"] = {
+            "address": self.visca_address_input.text().strip(),
+            "port": int(self.visca_port_input.value()),
+            "ptz_speed": int(self.ptz_speed_slider.value()),
+            "zoom_speed": int(self.zoom_speed_slider.value()),
+        }
+        if save:
+            save_config(self.config)
+
     def _apply_all_settings(self, save: bool) -> None:
         self._apply_game_params(save=False)
         self._apply_output_params(save=False)
+        self._apply_visca_params(save=False)
         if save:
             save_config(self.config)
+
+    def _extract_rtsp_host(self, rtsp_url: str) -> str:
+        if not rtsp_url:
+            return ""
+        parsed = urlparse(rtsp_url)
+        if parsed.hostname:
+            return parsed.hostname
+        parsed = urlparse(f"rtsp://{rtsp_url}")
+        if parsed.hostname:
+            return parsed.hostname
+        return ""
+
+    def _use_camera_for_visca(self) -> None:
+        host = self._extract_rtsp_host(self.rtsp_input.text().strip())
+        if not host:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid RTSP URL",
+                "Could not extract a camera host from the RTSP URL.",
+            )
+            return
+        self.visca_address_input.setText(host)
+        self._apply_visca_params(save=True)
+
+    def _visca_client(
+        self, warn_if_missing: bool = True, timeout_seconds: float = 0.5
+    ) -> ViscaOverIpClient | None:
+        address = self.visca_address_input.text().strip()
+        if not address:
+            if warn_if_missing:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Missing VISCA Address",
+                    "Enter the VISCA-over-IP camera address first.",
+                )
+            return None
+        return ViscaOverIpClient(
+            host=address,
+            port=int(self.visca_port_input.value()),
+            timeout=timeout_seconds,
+        )
+
+    def _refresh_visca_status(
+        self, warn_if_missing: bool = True, save_settings: bool = False, timeout_seconds: float = 0.2
+    ) -> None:
+        self._apply_visca_params(save=save_settings)
+        try:
+            client = self._visca_client(
+                warn_if_missing=warn_if_missing,
+                timeout_seconds=timeout_seconds,
+            )
+            if client is None:
+                return
+            status = client.read_status()
+            power = status.get("power")
+            focus_mode = status.get("focus_mode")
+            zoom_position = status.get("zoom_position")
+            power_text = "On" if power is True else ("Off" if power is False else "Unknown")
+            focus_text = str(focus_mode) if focus_mode is not None else "Unknown"
+            zoom_text = str(zoom_position) if zoom_position is not None else "Unknown"
+            self.visca_status_text.setPlainText(
+                f"Power: {power_text}\nFocus: {focus_text}\nZoom Position: {zoom_text}"
+            )
+            self._last_visca_status_refresh = time.monotonic()
+            self.visca_status_time_label.setText("Updated just now")
+        except (OSError, TimeoutError, ValueError) as exc:
+            self.visca_status_text.setPlainText(f"Status read failed:\n{exc}")
+
+    def _refresh_visca_status_auto(self) -> None:
+        if self._visca_status_busy:
+            return
+        self._visca_status_busy = True
+        try:
+            self._refresh_visca_status(
+                warn_if_missing=False,
+                save_settings=False,
+                timeout_seconds=0.08,
+            )
+        finally:
+            self._visca_status_busy = False
+
+    def _visca_send_move(self, direction: str) -> None:
+        self._apply_visca_params(save=True)
+        try:
+            client = self._visca_client()
+            if client is None:
+                return
+            ptz_speed = int(self.ptz_speed_slider.value())
+            zoom_speed = int(self.zoom_speed_slider.value())
+            if direction == "left":
+                client.pan_left(pan_speed=ptz_speed, tilt_speed=ptz_speed)
+            elif direction == "right":
+                client.pan_right(pan_speed=ptz_speed, tilt_speed=ptz_speed)
+            elif direction == "up":
+                client.tilt_up(pan_speed=ptz_speed, tilt_speed=ptz_speed)
+            elif direction == "down":
+                client.tilt_down(pan_speed=ptz_speed, tilt_speed=ptz_speed)
+            elif direction == "zoom_in":
+                client.zoom_in(speed=zoom_speed)
+            elif direction == "zoom_out":
+                client.zoom_out(speed=zoom_speed)
+            elif direction == "focus_in":
+                client.focus_far()
+            elif direction == "focus_out":
+                client.focus_near()
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, "VISCA Error", f"VISCA send failed: {exc}")
+
+    def _visca_stop_pan_tilt(self) -> None:
+        try:
+            client = self._visca_client(warn_if_missing=False)
+            if client is None:
+                return
+            ptz_speed = int(self.ptz_speed_slider.value())
+            client.pan_tilt_stop(pan_speed=ptz_speed, tilt_speed=ptz_speed)
+        except OSError:
+            pass
+
+    def _visca_stop_zoom(self) -> None:
+        try:
+            client = self._visca_client(warn_if_missing=False)
+            if client is None:
+                return
+            client.zoom_stop()
+        except OSError:
+            pass
+
+    def _visca_stop_focus(self) -> None:
+        try:
+            client = self._visca_client(warn_if_missing=False)
+            if client is None:
+                return
+            client.focus_stop()
+        except OSError:
+            pass
+
+    def _visca_autofocus(self) -> None:
+        self._apply_visca_params(save=True)
+        try:
+            client = self._visca_client()
+            if client is None:
+                return
+            client.autofocus_on()
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, "VISCA Error", f"VISCA send failed: {exc}")
+
+    def _visca_home(self) -> None:
+        self._apply_visca_params(save=True)
+        try:
+            client = self._visca_client()
+            if client is None:
+                return
+            client.home()
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, "VISCA Error", f"VISCA send failed: {exc}")
 
     def _reset_energy(self) -> None:
         self.energy_engine.reset()

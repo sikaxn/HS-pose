@@ -5,6 +5,7 @@ from hs_pose.constants import (
     DEFAULT_CONFIDENCE,
     DEFAULT_RTSP_TRANSPORT,
     DEFAULT_RTSP_URL,
+    DEFAULT_VISCA_PORT,
 )
 
 
@@ -32,6 +33,12 @@ def load_config() -> dict:
             "test_r": 255,
             "test_g": 64,
             "test_b": 64,
+        },
+        "visca": {
+            "address": "",
+            "port": DEFAULT_VISCA_PORT,
+            "ptz_speed": 8,
+            "zoom_speed": 2,
         },
     }
     if not CONFIG_PATH.exists():
@@ -138,6 +145,25 @@ def load_config() -> dict:
         default_config["sacn"]["test_b"],
         0,
     )
+    visca_data = data.get("visca", {})
+    if not isinstance(visca_data, dict):
+        visca_data = {}
+    visca_address = str(visca_data.get("address", default_config["visca"]["address"]))
+    visca_port = _to_int(
+        visca_data.get("port", default_config["visca"]["port"]),
+        default_config["visca"]["port"],
+        1,
+    )
+    visca_ptz_speed = _to_int(
+        visca_data.get("ptz_speed", default_config["visca"]["ptz_speed"]),
+        default_config["visca"]["ptz_speed"],
+        1,
+    )
+    visca_zoom_speed = _to_int(
+        visca_data.get("zoom_speed", default_config["visca"]["zoom_speed"]),
+        default_config["visca"]["zoom_speed"],
+        0,
+    )
 
     return {
         "rtsp_url": data.get("rtsp_url") or DEFAULT_RTSP_URL,
@@ -162,6 +188,12 @@ def load_config() -> dict:
             "test_r": min(255, test_r),
             "test_g": min(255, test_g),
             "test_b": min(255, test_b),
+        },
+        "visca": {
+            "address": visca_address,
+            "port": min(65535, visca_port),
+            "ptz_speed": min(24, visca_ptz_speed),
+            "zoom_speed": min(7, visca_zoom_speed),
         },
     }
 
