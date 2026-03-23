@@ -14,6 +14,7 @@ def load_config() -> dict:
         "rtsp_url": DEFAULT_RTSP_URL,
         "confidence": DEFAULT_CONFIDENCE,
         "transport": DEFAULT_RTSP_TRANSPORT,
+        "hs_weight_detection_enabled": True,
         "game": {
             "pixel_count": 120,
             "charge_rate": 1.0,
@@ -43,6 +44,7 @@ def load_config() -> dict:
                 "enabled": False,
                 "use_zoom": False,
                 "sensitivity": 50,
+                "anchor_mode": "full_body",
             },
         },
     }
@@ -65,6 +67,12 @@ def load_config() -> dict:
     transport = str(data.get("transport", DEFAULT_RTSP_TRANSPORT)).lower()
     if transport not in {"auto", "tcp", "udp"}:
         transport = DEFAULT_RTSP_TRANSPORT
+    hs_weight_detection_enabled = bool(
+        data.get(
+            "hs_weight_detection_enabled",
+            default_config["hs_weight_detection_enabled"],
+        )
+    )
 
     game_data = data.get("game", {})
     if not isinstance(game_data, dict):
@@ -189,11 +197,19 @@ def load_config() -> dict:
         default_config["visca"]["auto_track"]["sensitivity"],
         1,
     )
+    auto_track_anchor_mode = str(
+        auto_track_data.get(
+            "anchor_mode", default_config["visca"]["auto_track"]["anchor_mode"]
+        )
+    ).strip().lower()
+    if auto_track_anchor_mode not in {"head", "half_body", "full_body"}:
+        auto_track_anchor_mode = default_config["visca"]["auto_track"]["anchor_mode"]
 
     return {
         "rtsp_url": data.get("rtsp_url") or DEFAULT_RTSP_URL,
         "confidence": confidence,
         "transport": transport,
+        "hs_weight_detection_enabled": hs_weight_detection_enabled,
         "game": {
             "pixel_count": pixel_count,
             "charge_rate": charge_rate,
@@ -223,6 +239,7 @@ def load_config() -> dict:
                 "enabled": auto_track_enabled,
                 "use_zoom": auto_track_use_zoom,
                 "sensitivity": min(100, auto_track_sensitivity),
+                "anchor_mode": auto_track_anchor_mode,
             },
         },
     }

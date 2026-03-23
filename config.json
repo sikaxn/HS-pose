@@ -2,6 +2,7 @@
   "rtsp_url": "rtsp://10.0.0.181:554/live/av0",
   "confidence": 0.45,
   "transport": "tcp",
+  "hs_weight_detection_enabled": false,
   "game": {
     "pixel_count": 140,
     "charge_rate": 10.0,
@@ -25,12 +26,13 @@
   "visca": {
     "address": "10.0.0.181",
     "port": 52381,
-    "ptz_speed": 16,
+    "ptz_speed": 24,
     "zoom_speed": 2,
     "auto_track": {
-      "enabled": false,
+      "enabled": true,
       "use_zoom": true,
-      "sensitivity": 83
+      "sensitivity": 85,
+      "anchor_mode": "head"
     }
   }
 }

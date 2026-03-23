@@ -18,6 +18,7 @@ class AutoTracker:
         self._last_zoom = None
         self._status_override = None
         self._manual_override = False
+        self._anchor_mode = "full_body"
 
     def set_frame_mapping(self, source_size: QtCore.QSize, display_rect: QtCore.QRect) -> None:
         self._last_source_frame_size = QtCore.QSize(source_size)
@@ -30,6 +31,22 @@ class AutoTracker:
         self._detector.set_selected_pose_track_id(None)
         self._status_override = None
         self._manual_override = False
+
+    def reset_selection_to_zero(self) -> None:
+        self.clear_selection()
+        reset_fn = getattr(self._detector, "reset_pose_tracking", None)
+        if callable(reset_fn):
+            reset_fn(start_track_id=0)
+
+    def set_anchor_mode(self, mode: str) -> None:
+        normalized = str(mode).strip().lower()
+        if normalized not in {"head", "half_body", "full_body"}:
+            normalized = "full_body"
+        self._anchor_mode = normalized
+        set_mode_fn = getattr(self._detector, "set_selected_anchor_mode", None)
+        if callable(set_mode_fn):
+            set_mode_fn(normalized)
+        self._rebase_anchor_to_current_pose()
 
     def update_pose_data(self, pose_data: object) -> None:
         if isinstance(pose_data, list):
@@ -83,7 +100,10 @@ class AutoTracker:
         if self._selected_pose_track_id is None:
             return "Auto-track is ON. Click a pose." if enabled else "Click a pose to select target."
         mode = "ON" if enabled else "OFF"
-        return f"Pose {self._selected_pose_track_id} selected. Auto-track {mode}."
+        return (
+            f"Pose {self._selected_pose_track_id} selected. "
+            f"Auto-track {mode}. Anchor: {self._anchor_mode.replace('_', ' ')}."
+        )
 
     def stop_motion(self, ptz_speed: int) -> None:
         self._send_pan_tilt(0x03, 0x03, int(ptz_speed), int(ptz_speed))
@@ -115,15 +135,10 @@ class AutoTracker:
             self.stop_motion(ptz_speed=ptz_speed)
             return "Selected pose is not visible."
 
-        center = selected_pose.get("center")
-        if not isinstance(center, list) or len(center) != 2:
+        anchor = self._anchor_from_pose(selected_pose)
+        if anchor is None:
             return None
-        frame_w = max(1, self._last_source_frame_size.width())
-        frame_h = max(1, self._last_source_frame_size.height())
-        current_x = min(max(float(center[0]) / frame_w, 0.0), 1.0)
-        current_y = min(max(float(center[1]) / frame_h, 0.0), 1.0)
-        current_area = float(selected_pose.get("area", 0.0))
-        current_norm_area = min(max(current_area / float(frame_w * frame_h), 0.0), 1.0)
+        current_x, current_y, current_norm_area = anchor
 
         anchor_x, anchor_y, anchor_area = self._selected_pose_anchor
         error_x = current_x - anchor_x
@@ -192,15 +207,10 @@ class AutoTracker:
         track_id = int(pose.get("track_id", -1))
         if track_id < 0:
             return
-        center = pose.get("center")
-        area = float(pose.get("area", 0.0))
-        if not isinstance(center, list) or len(center) != 2:
+        anchor = self._anchor_from_pose(pose)
+        if anchor is None:
             return
-        frame_w = max(1, self._last_source_frame_size.width())
-        frame_h = max(1, self._last_source_frame_size.height())
-        anchor_x = min(max(float(center[0]) / frame_w, 0.0), 1.0)
-        anchor_y = min(max(float(center[1]) / frame_h, 0.0), 1.0)
-        norm_area = min(max(area / float(frame_w * frame_h), 0.0), 1.0)
+        anchor_x, anchor_y, norm_area = anchor
         self._selected_pose_track_id = track_id
         self._selected_pose_anchor = (anchor_x, anchor_y, norm_area)
         self._detector.set_selected_pose_track_id(track_id)
@@ -220,16 +230,44 @@ class AutoTracker:
                 break
         if selected_pose is None:
             return
-        center = selected_pose.get("center")
-        area = float(selected_pose.get("area", 0.0))
-        if not isinstance(center, list) or len(center) != 2:
+        anchor = self._anchor_from_pose(selected_pose)
+        if anchor is None:
             return
+        anchor_x, anchor_y, norm_area = anchor
+        self._selected_pose_anchor = (anchor_x, anchor_y, norm_area)
+
+    def _anchor_from_pose(self, pose: dict) -> tuple[float, float, float] | None:
+        bbox = pose.get("bbox")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            return None
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        width = max(1.0, x2 - x1)
+        height = max(1.0, y2 - y1)
+        ax1, ay1, ax2, ay2 = x1, y1, x2, y2
+
+        if self._anchor_mode == "head":
+            ax1 = x1 + (0.2 * width)
+            ax2 = x2 - (0.2 * width)
+            ay2 = y1 + (0.35 * height)
+        elif self._anchor_mode == "half_body":
+            ax1 = x1 + (0.1 * width)
+            ax2 = x2 - (0.1 * width)
+            ay2 = y1 + (0.6 * height)
+
+        if ax2 <= ax1:
+            ax1, ax2 = x1, x2
+        if ay2 <= ay1:
+            ay1, ay2 = y1, y2
+
         frame_w = max(1, self._last_source_frame_size.width())
         frame_h = max(1, self._last_source_frame_size.height())
-        anchor_x = min(max(float(center[0]) / frame_w, 0.0), 1.0)
-        anchor_y = min(max(float(center[1]) / frame_h, 0.0), 1.0)
+        center_x = (ax1 + ax2) / 2.0
+        center_y = (ay1 + ay2) / 2.0
+        area = max(1.0, (ax2 - ax1) * (ay2 - ay1))
+        norm_x = min(max(center_x / frame_w, 0.0), 1.0)
+        norm_y = min(max(center_y / frame_h, 0.0), 1.0)
         norm_area = min(max(area / float(frame_w * frame_h), 0.0), 1.0)
-        self._selected_pose_anchor = (anchor_x, anchor_y, norm_area)
+        return norm_x, norm_y, norm_area
 
     def _axis_to_ptz(
         self, error: float, deadband: float, sensitivity_01: float, ptz_speed: int

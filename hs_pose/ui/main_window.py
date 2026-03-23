@@ -41,6 +41,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.detector = YoloV5Detector(MODEL_PATH)
         self.stream_worker = None
         self.detector.set_confidence(self.config["confidence"])
+        self.detector.set_hs_weight_detection_enabled(
+            bool(self.config.get("hs_weight_detection_enabled", True))
+        )
 
         self.latest_waving_counts = {cloth: 0 for cloth in CLOTH_ORDER}
         self.latest_shirt_counts = {cloth: 0 for cloth in CLOTH_ORDER}
@@ -107,6 +110,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_button = QtWidgets.QPushButton("Start")
         self.stop_button = QtWidgets.QPushButton("Stop")
         self.stop_button.setEnabled(False)
+        self.hs_weight_detection_input = QtWidgets.QCheckBox("ISA HS Weight Detection")
+        self.hs_weight_detection_input.setChecked(
+            bool(self.config.get("hs_weight_detection_enabled", True))
+        )
+        self.show_energy_game_input = QtWidgets.QCheckBox("Show Energy Game")
+        self.show_energy_game_input.setChecked(True)
 
         controls_layout.addWidget(rtsp_label)
         controls_layout.addWidget(self.rtsp_input, 1)
@@ -114,8 +123,10 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(self.transport_input)
         controls_layout.addWidget(confidence_label)
         controls_layout.addWidget(self.confidence_input)
+        controls_layout.addWidget(self.hs_weight_detection_input)
         controls_layout.addWidget(self.start_button)
         controls_layout.addWidget(self.stop_button)
+        controls_layout.addWidget(self.show_energy_game_input)
 
         visca_cfg = self.config.get("visca", {})
         self.visca_address_input = QtWidgets.QLineEdit(str(visca_cfg.get("address", "")))
@@ -218,9 +229,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_track_use_zoom_input.setChecked(
             bool(auto_track_cfg.get("use_zoom", False))
         )
+        self.auto_track_anchor_mode_input = QtWidgets.QComboBox()
+        self.auto_track_anchor_mode_input.addItem("Head", "head")
+        self.auto_track_anchor_mode_input.addItem("Half Body", "half_body")
+        self.auto_track_anchor_mode_input.addItem("Full Body", "full_body")
+        selected_anchor_mode = str(auto_track_cfg.get("anchor_mode", "full_body")).strip().lower()
+        selected_anchor_index = self.auto_track_anchor_mode_input.findData(selected_anchor_mode)
+        if selected_anchor_index >= 0:
+            self.auto_track_anchor_mode_input.setCurrentIndex(selected_anchor_index)
+        self.auto_track_reset_button = QtWidgets.QPushButton("Reset")
         auto_track_controls.addWidget(QtWidgets.QLabel("Track"))
         auto_track_controls.addWidget(self.auto_track_toggle_button)
         auto_track_controls.addWidget(self.auto_track_use_zoom_input)
+        auto_track_controls.addWidget(QtWidgets.QLabel("Anchor"))
+        auto_track_controls.addWidget(self.auto_track_anchor_mode_input)
+        auto_track_controls.addWidget(self.auto_track_reset_button)
         auto_track_controls.addStretch(1)
 
         sensitivity_row = QtWidgets.QHBoxLayout()
@@ -259,6 +282,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.detected_title = QtWidgets.QLabel("Detected")
         self.detected_title.setStyleSheet("font-weight: 600; color: #000;")
+        self.show_label_overlay_input = QtWidgets.QCheckBox("Show Label")
+        self.show_label_overlay_input.setChecked(True)
+        self.show_pose_overlay_input = QtWidgets.QCheckBox("Show Pose")
+        self.show_pose_overlay_input.setChecked(True)
         self.detected_text = QtWidgets.QPlainTextEdit()
         self.detected_text.setReadOnly(True)
         self.detected_text.setMinimumWidth(260)
@@ -281,13 +308,18 @@ class MainWindow(QtWidgets.QMainWindow):
         detected_layout.addWidget(visca_status_group)
         detected_layout.addWidget(auto_track_group)
         detected_layout.addWidget(self.detected_title)
+        detected_toggle_layout = QtWidgets.QHBoxLayout()
+        detected_toggle_layout.addWidget(self.show_label_overlay_input)
+        detected_toggle_layout.addWidget(self.show_pose_overlay_input)
+        detected_toggle_layout.addStretch(1)
+        detected_layout.addLayout(detected_toggle_layout)
         detected_layout.addWidget(self.detected_text, 1)
         content_layout.addLayout(detected_layout)
         main_layout.addLayout(content_layout, 1)
 
-        game_group = QtWidgets.QGroupBox("Energy Game / LED Strip Simulator")
-        game_group.setStyleSheet("QGroupBox { color: #000; }")
-        game_layout = QtWidgets.QVBoxLayout(game_group)
+        self.game_group = QtWidgets.QGroupBox("Energy Game / LED Strip Simulator")
+        self.game_group.setStyleSheet("QGroupBox { color: #000; }")
+        game_layout = QtWidgets.QVBoxLayout(self.game_group)
 
         params_layout = QtWidgets.QHBoxLayout()
         game_cfg = self.config.get("game", {})
@@ -408,7 +440,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.energy_status_label.setStyleSheet("color: #000;")
         game_layout.addWidget(self.energy_status_label)
 
-        main_layout.addWidget(game_group)
+        main_layout.addWidget(self.game_group)
         main_layout.addWidget(self.status_label)
 
         self.start_button.clicked.connect(self.start_stream)
@@ -455,15 +487,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_track_use_zoom_input.toggled.connect(
             lambda _checked: self._apply_visca_params(save=True)
         )
+        self.auto_track_anchor_mode_input.currentIndexChanged.connect(
+            self._on_auto_track_anchor_mode_changed
+        )
+        self.auto_track_reset_button.clicked.connect(self._on_auto_track_reset_clicked)
         self.auto_track_sensitivity_slider.valueChanged.connect(
             self._on_auto_track_sensitivity_changed
         )
         self.auto_track_sensitivity_slider.sliderReleased.connect(
             lambda: self._apply_visca_params(save=True)
         )
+        self.show_energy_game_input.toggled.connect(self.game_group.setVisible)
+        self.hs_weight_detection_input.toggled.connect(self._on_hs_weight_detection_toggled)
+        self.show_label_overlay_input.toggled.connect(self._on_overlay_visibility_changed)
+        self.show_pose_overlay_input.toggled.connect(self._on_overlay_visibility_changed)
         self.auto_track_toggle_button.setText(
             "On" if self.auto_track_toggle_button.isChecked() else "Off"
         )
+        self._on_overlay_visibility_changed()
+        self._on_auto_track_anchor_mode_changed()
+        self._sync_energy_game_visibility_with_detection()
         self._update_auto_track_status()
 
     def _on_auto_track_sensitivity_changed(self, value: int) -> None:
@@ -500,6 +543,38 @@ class MainWindow(QtWidgets.QMainWindow):
             self.auto_tracker.stop_motion(ptz_speed=int(self.ptz_speed_slider.value()))
         self._apply_visca_params(save=True)
         self._update_auto_track_status()
+
+    def _on_auto_track_reset_clicked(self) -> None:
+        self.auto_tracker.reset_selection_to_zero()
+        self.auto_tracker.stop_motion(ptz_speed=int(self.ptz_speed_slider.value()))
+        self._update_auto_track_status(extra_text="Pose reset to 0. Click a pose to select target.")
+
+    def _on_auto_track_anchor_mode_changed(self) -> None:
+        anchor_mode = str(self.auto_track_anchor_mode_input.currentData() or "full_body")
+        self.auto_tracker.set_anchor_mode(anchor_mode)
+        self._apply_visca_params(save=True)
+        self._update_auto_track_status()
+
+    def _on_overlay_visibility_changed(self) -> None:
+        self.detector.set_overlay_visibility(
+            show_labels=self.show_label_overlay_input.isChecked(),
+            show_pose=self.show_pose_overlay_input.isChecked(),
+        )
+
+    def _on_hs_weight_detection_toggled(self, enabled: bool) -> None:
+        self.detector.set_hs_weight_detection_enabled(bool(enabled))
+        self._sync_energy_game_visibility_with_detection()
+        self.config["hs_weight_detection_enabled"] = bool(enabled)
+        save_config(self.config)
+
+    def _sync_energy_game_visibility_with_detection(self) -> None:
+        if not self.hs_weight_detection_input.isChecked():
+            self.show_energy_game_input.setChecked(False)
+            self.show_energy_game_input.setEnabled(False)
+            self.game_group.setVisible(False)
+            return
+        self.show_energy_game_input.setEnabled(True)
+        self.game_group.setVisible(self.show_energy_game_input.isChecked())
 
     def _on_pose_data_changed(self, pose_data: object) -> None:
         self.auto_tracker.update_pose_data(pose_data)
@@ -600,6 +675,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "enabled": self.auto_track_toggle_button.isChecked(),
                 "use_zoom": self.auto_track_use_zoom_input.isChecked(),
                 "sensitivity": sensitivity,
+                "anchor_mode": str(
+                    self.auto_track_anchor_mode_input.currentData() or "full_body"
+                ),
             },
         }
         if save:
@@ -871,6 +949,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config["rtsp_url"] = rtsp_url
         self.config["confidence"] = confidence
         self.config["transport"] = transport
+        self.config["hs_weight_detection_enabled"] = self.hs_weight_detection_input.isChecked()
         save_config(self.config)
 
         self.stop_stream()

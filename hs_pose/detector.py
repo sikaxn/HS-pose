@@ -66,6 +66,10 @@ class YoloV5Detector:
             torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
         )
         self.confidence = DEFAULT_CONFIDENCE
+        self.hs_weight_detection_enabled = True
+        self.show_label_overlay = True
+        self.show_pose_overlay = True
+        self.selected_anchor_mode = "full_body"
         self._tracks = {}
         self._next_track_id = 1
         self._selected_pose_track_id = None
@@ -75,19 +79,41 @@ class YoloV5Detector:
             int(track_id) if track_id is not None else None
         )
 
+    def reset_pose_tracking(self, start_track_id: int = 0) -> None:
+        self._tracks = {}
+        self._next_track_id = max(0, int(start_track_id))
+        self._selected_pose_track_id = None
+
     def set_confidence(self, confidence: float) -> None:
         confidence = min(max(float(confidence), 0.0), 1.0)
         self.model.conf = confidence
         self.confidence = confidence
 
+    def set_overlay_visibility(self, show_labels: bool, show_pose: bool) -> None:
+        self.show_label_overlay = bool(show_labels)
+        self.show_pose_overlay = bool(show_pose)
+
+    def set_selected_anchor_mode(self, mode: str) -> None:
+        normalized = str(mode).strip().lower()
+        if normalized not in {"head", "half_body", "full_body"}:
+            normalized = "full_body"
+        self.selected_anchor_mode = normalized
+
+    def set_hs_weight_detection_enabled(self, enabled: bool) -> None:
+        self.hs_weight_detection_enabled = bool(enabled)
+
     def infer(self, frame):
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.model(rgb_frame, size=640)
-        detections = results.xyxy[0].detach().cpu().numpy()
+        detections = []
+        if self.hs_weight_detection_enabled:
+            results = self.model(rgb_frame, size=640)
+            detections = results.xyxy[0].detach().cpu().numpy()
         annotated = frame.copy()
         shirt_detections = []
         shirt_by_class = {}
         detected_items = []
+        if not self.hs_weight_detection_enabled:
+            detected_items.append("ISA HS weight detection: OFF")
 
         for x1, y1, x2, y2, confidence, class_id in detections:
             x1_i, y1_i, x2_i, y2_i = map(int, [x1, y1, x2, y2])
@@ -106,31 +132,32 @@ class YoloV5Detector:
             shirt_by_class[class_name] = shirt_by_class.get(class_name, 0) + 1
             detected_items.append(label)
 
-            cv2.rectangle(annotated, (x1_i, y1_i), (x2_i, y2_i), color, 2)
-            text_size, baseline = cv2.getTextSize(
-                label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
-            )
-            text_top = max(y1_i - text_size[1] - baseline - 6, 0)
-            text_bottom = text_top + text_size[1] + baseline + 6
-            text_right = x1_i + text_size[0] + 8
+            if self.show_label_overlay:
+                cv2.rectangle(annotated, (x1_i, y1_i), (x2_i, y2_i), color, 2)
+                text_size, baseline = cv2.getTextSize(
+                    label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+                )
+                text_top = max(y1_i - text_size[1] - baseline - 6, 0)
+                text_bottom = text_top + text_size[1] + baseline + 6
+                text_right = x1_i + text_size[0] + 8
 
-            cv2.rectangle(
-                annotated,
-                (x1_i, text_top),
-                (text_right, text_bottom),
-                color,
-                -1,
-            )
-            cv2.putText(
-                annotated,
-                label,
-                (x1_i + 4, text_bottom - baseline - 2),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
+                cv2.rectangle(
+                    annotated,
+                    (x1_i, text_top),
+                    (text_right, text_bottom),
+                    color,
+                    -1,
+                )
+                cv2.putText(
+                    annotated,
+                    label,
+                    (x1_i + 4, text_bottom - baseline - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
 
         pose_count, waving_count, waving_by_class, pose_data = self._draw_pose_and_actions(
             annotated, rgb_frame, shirt_detections
@@ -177,7 +204,12 @@ class YoloV5Detector:
         person_count = 0
         for idx, person_points in enumerate(xy):
             point_conf = conf[idx] if conf is not None else None
-            if self._draw_single_pose(annotated, person_points, point_conf):
+            if self._draw_single_pose(
+                annotated,
+                person_points,
+                point_conf,
+                draw_overlay=self.show_pose_overlay,
+            ):
                 person_count += 1
                 people.append(
                     {
@@ -192,7 +224,7 @@ class YoloV5Detector:
         )
         return person_count, waving_count, waving_by_class, pose_data
 
-    def _draw_single_pose(self, annotated, points, point_conf) -> bool:
+    def _draw_single_pose(self, annotated, points, point_conf, draw_overlay: bool = True) -> bool:
         visible_points = {}
         for index, point in enumerate(points):
             x_coord, y_coord = map(int, point[:2])
@@ -201,7 +233,8 @@ class YoloV5Detector:
                 continue
 
             visible_points[index] = (x_coord, y_coord)
-            cv2.circle(annotated, (x_coord, y_coord), 4, (0, 255, 255), -1)
+            if draw_overlay:
+                cv2.circle(annotated, (x_coord, y_coord), 4, (0, 255, 255), -1)
 
         if not visible_points:
             return False
@@ -209,14 +242,15 @@ class YoloV5Detector:
         for start_idx, end_idx in self._POSE_SKELETON:
             if start_idx not in visible_points or end_idx not in visible_points:
                 continue
-            cv2.line(
-                annotated,
-                visible_points[start_idx],
-                visible_points[end_idx],
-                (0, 255, 0),
-                2,
-                cv2.LINE_AA,
-            )
+            if draw_overlay:
+                cv2.line(
+                    annotated,
+                    visible_points[start_idx],
+                    visible_points[end_idx],
+                    (0, 255, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
 
         return True
 
@@ -251,17 +285,26 @@ class YoloV5Detector:
             pose_id_color = (0, 255, 255)
             if self._selected_pose_track_id == track_id:
                 pose_id_color = (80, 255, 80)
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), pose_id_color, 2)
-            cv2.putText(
-                annotated,
-                f"Pose {track_id}",
-                (x1 + 2, max(y1 - 32, 16)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                pose_id_color,
-                2,
-                cv2.LINE_AA,
-            )
+                sx1, sy1, sx2, sy2 = self._anchor_box_from_bbox(person_box)
+                cv2.rectangle(
+                    annotated,
+                    (int(sx1), int(sy1)),
+                    (int(sx2), int(sy2)),
+                    pose_id_color,
+                    2,
+                )
+
+            if self.show_pose_overlay:
+                cv2.putText(
+                    annotated,
+                    f"Pose {track_id}",
+                    (x1 + 2, max(y1 - 32, 16)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    pose_id_color,
+                    2,
+                    cv2.LINE_AA,
+                )
             left_waving, right_waving = self._update_wave_state(track, person)
             if not left_waving and not right_waving:
                 continue
@@ -277,23 +320,24 @@ class YoloV5Detector:
                 banner_color = shirt_detection["color"]
                 class_name = shirt_detection["class_name"]
                 waving_by_class[class_name] = waving_by_class.get(class_name, 0) + 1
-            cv2.rectangle(
-                annotated,
-                (x1, max(y1 - 28, 0)),
-                (x2, y1),
-                banner_color,
-                -1,
-            )
-            cv2.putText(
-                annotated,
-                banner,
-                (x1 + 4, max(y1 - 8, 14)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 0, 0),
-                2,
-                cv2.LINE_AA,
-            )
+            if self.show_label_overlay:
+                cv2.rectangle(
+                    annotated,
+                    (x1, max(y1 - 28, 0)),
+                    (x2, y1),
+                    banner_color,
+                    -1,
+                )
+                cv2.putText(
+                    annotated,
+                    banner,
+                    (x1 + 4, max(y1 - 8, 14)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 0, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
 
         return waving_count, waving_by_class, pose_data
 
@@ -494,6 +538,27 @@ class YoloV5Detector:
         if left_waving:
             return "left hand"
         return "right hand"
+
+    def _anchor_box_from_bbox(self, bbox) -> tuple[float, float, float, float]:
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        width = max(1.0, x2 - x1)
+        height = max(1.0, y2 - y1)
+        ax1, ay1, ax2, ay2 = x1, y1, x2, y2
+
+        if self.selected_anchor_mode == "head":
+            ax1 = x1 + (0.2 * width)
+            ax2 = x2 - (0.2 * width)
+            ay2 = y1 + (0.35 * height)
+        elif self.selected_anchor_mode == "half_body":
+            ax1 = x1 + (0.1 * width)
+            ax2 = x2 - (0.1 * width)
+            ay2 = y1 + (0.6 * height)
+
+        if ax2 <= ax1:
+            ax1, ax2 = x1, x2
+        if ay2 <= ay1:
+            ay1, ay2 = y1, y2
+        return ax1, ay1, ax2, ay2
 
     @staticmethod
     def _color_for_class(class_index: int):
