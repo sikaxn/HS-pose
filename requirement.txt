@@ -1,5 +1,7 @@
 numpy
 opencv-python
+onnxruntime
+insightface
 PyGObject
 PyQt5
 torch

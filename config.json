@@ -2,7 +2,7 @@
   "rtsp_url": "rtsp://10.0.0.181:554/live/av0",
   "confidence": 0.45,
   "transport": "tcp",
-  "hs_weight_detection_enabled": false,
+  "hs_weight_detection_enabled": true,
   "game": {
     "pixel_count": 140,
     "charge_rate": 10.0,
@@ -29,10 +29,11 @@
     "ptz_speed": 24,
     "zoom_speed": 2,
     "auto_track": {
-      "enabled": true,
+      "enabled": false,
       "use_zoom": true,
-      "sensitivity": 85,
-      "anchor_mode": "head"
+      "sensitivity": 66,
+      "anchor_mode": "head",
+      "use_face_recog": true
     }
   }
 }

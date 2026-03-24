@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import time
 
+import numpy as np
 from PyQt5 import QtCore
 
 
 class AutoTracker:
-    def __init__(self, detector, visca_client_factory: Callable[[float], object | None]) -> None:
+    def __init__(
+        self,
+        detector,
+        visca_client_factory: Callable[[float], object | None],
+        face_recognizer=None,
+    ) -> None:
         self._detector = detector
         self._visca_client_factory = visca_client_factory
+        self._face_recognizer = face_recognizer
         self._latest_pose_data = []
+        self._latest_frame_bgr = None
         self._selected_pose_track_id = None
         self._selected_pose_anchor = None
         self._last_source_frame_size = QtCore.QSize()
@@ -19,6 +28,11 @@ class AutoTracker:
         self._status_override = None
         self._manual_override = False
         self._anchor_mode = "full_body"
+        self._use_face_recognition = False
+        self._face_target_embedding = None
+        self._face_target_crop = None
+        self._last_face_learn_attempt = 0.0
+        self._face_status_message = "Face recognition is off."
 
     def set_frame_mapping(self, source_size: QtCore.QSize, display_rect: QtCore.QRect) -> None:
         self._last_source_frame_size = QtCore.QSize(source_size)
@@ -31,6 +45,13 @@ class AutoTracker:
         self._detector.set_selected_pose_track_id(None)
         self._status_override = None
         self._manual_override = False
+        self._face_target_embedding = None
+        self._face_target_crop = None
+        self._last_face_learn_attempt = 0.0
+        if self._use_face_recognition:
+            self._face_status_message = "Waiting to learn face..."
+        else:
+            self._face_status_message = "Face recognition is off."
 
     def reset_selection_to_zero(self) -> None:
         self.clear_selection()
@@ -47,6 +68,37 @@ class AutoTracker:
         if callable(set_mode_fn):
             set_mode_fn(normalized)
         self._rebase_anchor_to_current_pose()
+
+    def set_use_face_recognition(self, enabled: bool) -> None:
+        self._use_face_recognition = bool(enabled)
+        if not self._use_face_recognition:
+            self._face_target_embedding = None
+            self._face_target_crop = None
+            self._face_status_message = "Face recognition is off."
+        else:
+            self._face_status_message = "Waiting to learn face..."
+        self._last_face_learn_attempt = 0.0
+
+    def set_latest_frame(self, frame_bgr) -> None:
+        self._latest_frame_bgr = frame_bgr
+
+    def get_learned_face_crop(self):
+        return self._face_target_crop
+
+    def is_face_learned(self) -> bool:
+        return self._face_target_embedding is not None
+
+    def get_face_status_text(self) -> str:
+        return self._face_status_message
+
+    def reset_face_data(self) -> None:
+        self._face_target_embedding = None
+        self._face_target_crop = None
+        self._last_face_learn_attempt = 0.0
+        if self._use_face_recognition:
+            self._face_status_message = "Waiting to learn face..."
+        else:
+            self._face_status_message = "Face recognition is off."
 
     def update_pose_data(self, pose_data: object) -> None:
         if isinstance(pose_data, list):
@@ -67,6 +119,10 @@ class AutoTracker:
             self._status_override = "Selected pose lost."
         else:
             self._status_override = None
+            if self._use_face_recognition and self._face_target_embedding is None:
+                selected_pose = self._find_selected_pose()
+                if selected_pose is not None:
+                    self._learn_face_from_pose(selected_pose, force=False)
 
     def select_from_click(self, point: QtCore.QPoint) -> str | None:
         if not self._latest_pose_data:
@@ -132,8 +188,14 @@ class AutoTracker:
                 selected_pose = pose
                 break
         if selected_pose is None:
+            reacquired_pose = self._try_reacquire_with_face()
+            if reacquired_pose is not None:
+                self._reacquire_pose_keep_anchor(reacquired_pose)
+                return f"Face reacquired Pose {self._selected_pose_track_id}."
             self.stop_motion(ptz_speed=ptz_speed)
             return "Selected pose is not visible."
+        if self._use_face_recognition and self._face_target_embedding is None:
+            self._learn_face_from_pose(selected_pose, force=False)
 
         anchor = self._anchor_from_pose(selected_pose)
         if anchor is None:
@@ -217,6 +279,21 @@ class AutoTracker:
         self._last_pan_tilt = None
         self._last_zoom = None
         self._status_override = None
+        self._learn_face_from_pose(pose, force=True)
+
+    def _reacquire_pose_keep_anchor(self, pose: dict) -> None:
+        track_id = int(pose.get("track_id", -1))
+        if track_id < 0:
+            return
+        # Keep existing anchor so the camera returns to the same relative composition.
+        self._selected_pose_track_id = track_id
+        self._detector.set_selected_pose_track_id(track_id)
+        self._last_pan_tilt = None
+        self._last_zoom = None
+        self._status_override = "Face reacquired. Restoring previous framing."
+        if self._use_face_recognition:
+            # Refine learned face sample on reacquire using current implementation path.
+            self._learn_face_from_pose(pose, force=False)
 
     def _rebase_anchor_to_current_pose(self) -> None:
         if self._selected_pose_track_id is None:
@@ -268,6 +345,60 @@ class AutoTracker:
         norm_y = min(max(center_y / frame_h, 0.0), 1.0)
         norm_area = min(max(area / float(frame_w * frame_h), 0.0), 1.0)
         return norm_x, norm_y, norm_area
+
+    def _learn_face_from_pose(self, pose: dict, force: bool = False) -> None:
+        if not self._use_face_recognition:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_face_learn_attempt < 0.4:
+            return
+        self._last_face_learn_attempt = now
+        if self._face_recognizer is None or self._latest_frame_bgr is None:
+            self._status_override = "Learning face... waiting for frame."
+            self._face_status_message = "Learning face... waiting for frame."
+            return
+        bbox = pose.get("bbox")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            return
+        embedding, crop = self._face_recognizer.learn_from_pose_bbox(
+            self._latest_frame_bgr,
+            bbox,
+        )
+        if embedding is None:
+            self._status_override = "Learning face... no face found yet."
+            self._face_target_embedding = None
+            self._face_target_crop = None
+            self._face_status_message = "Learning face... no face found yet."
+            return
+        self._face_target_embedding = np.asarray(embedding, dtype=np.float32).reshape(-1)
+        self._face_target_crop = crop
+        self._status_override = "Face learned for selected pose."
+        self._face_status_message = "Face learned."
+
+    def _find_selected_pose(self) -> dict | None:
+        if self._selected_pose_track_id is None:
+            return None
+        for pose in self._latest_pose_data:
+            if not isinstance(pose, dict):
+                continue
+            if int(pose.get("track_id", -1)) == self._selected_pose_track_id:
+                return pose
+        return None
+
+    def _try_reacquire_with_face(self) -> dict | None:
+        if not self._use_face_recognition:
+            return None
+        if self._face_recognizer is None:
+            return None
+        if self._latest_frame_bgr is None:
+            return None
+        if self._face_target_embedding is None:
+            return None
+        return self._face_recognizer.find_pose_for_identity(
+            self._latest_frame_bgr,
+            self._latest_pose_data,
+            self._face_target_embedding,
+        )
 
     def _axis_to_ptz(
         self, error: float, deadband: float, sensitivity_01: float, ptz_speed: int

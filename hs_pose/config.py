@@ -45,6 +45,7 @@ def load_config() -> dict:
                 "use_zoom": False,
                 "sensitivity": 50,
                 "anchor_mode": "full_body",
+                "use_face_recog": False,
             },
         },
     }
@@ -204,6 +205,11 @@ def load_config() -> dict:
     ).strip().lower()
     if auto_track_anchor_mode not in {"head", "half_body", "full_body"}:
         auto_track_anchor_mode = default_config["visca"]["auto_track"]["anchor_mode"]
+    auto_track_use_face_recog = bool(
+        auto_track_data.get(
+            "use_face_recog", default_config["visca"]["auto_track"]["use_face_recog"]
+        )
+    )
 
     return {
         "rtsp_url": data.get("rtsp_url") or DEFAULT_RTSP_URL,
@@ -240,6 +246,7 @@ def load_config() -> dict:
                 "use_zoom": auto_track_use_zoom,
                 "sensitivity": min(100, auto_track_sensitivity),
                 "anchor_mode": auto_track_anchor_mode,
+                "use_face_recog": auto_track_use_face_recog,
             },
         },
     }

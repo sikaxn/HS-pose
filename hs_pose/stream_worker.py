@@ -11,6 +11,7 @@ from hs_pose.ui.image_utils import to_qimage_bgr
 
 class StreamWorker(QtCore.QThread):
     frame_ready = QtCore.pyqtSignal(QtGui.QImage)
+    raw_frame_changed = QtCore.pyqtSignal(object)
     detected_changed = QtCore.pyqtSignal(str)
     pose_data_changed = QtCore.pyqtSignal(object)
     waving_classes_changed = QtCore.pyqtSignal(dict)
@@ -85,6 +86,7 @@ class StreamWorker(QtCore.QThread):
                 break
 
             self._record_infer_frame()
+            self.raw_frame_changed.emit(frame.copy())
             self.frame_ready.emit(to_qimage_bgr(annotated))
             self.detected_changed.emit("\n".join(detected_items) if detected_items else "No detections")
             self.pose_data_changed.emit(pose_data)

@@ -13,9 +13,11 @@ from hs_pose.constants import (
 )
 from hs_pose.detector import YoloV5Detector
 from hs_pose.energy_game import CLOTH_ORDER, EnergyGameEngine, GameParams
+from hs_pose.face_recognizer import InsightFaceRecognizer
 from hs_pose.led_test_patterns import TEST_PALETTES, build_test_pixels
 from hs_pose.sacn_sender import SacnSender
 from hs_pose.stream_worker import StreamWorker
+from hs_pose.ui.image_utils import to_qimage_bgr
 from hs_pose.ui.led_strip_simulator import LedStripSimulatorWidget
 from hs_pose.visca_over_ip import ViscaOverIpClient
 
@@ -59,12 +61,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_game_tick = time.monotonic()
         self._started_at = time.monotonic()
         self._last_visca_status_refresh = 0.0
+        self.face_recognizer = InsightFaceRecognizer()
         self.auto_tracker = AutoTracker(
             detector=self.detector,
             visca_client_factory=lambda timeout: self._visca_client(
                 warn_if_missing=False,
                 timeout_seconds=timeout,
             ),
+            face_recognizer=self.face_recognizer,
         )
 
         self._build_ui()
@@ -229,6 +233,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_track_use_zoom_input.setChecked(
             bool(auto_track_cfg.get("use_zoom", False))
         )
+        self.auto_track_use_face_input = QtWidgets.QCheckBox("Use Face Recog")
+        self.auto_track_use_face_input.setChecked(
+            bool(auto_track_cfg.get("use_face_recog", False))
+        )
+        self.auto_track_reset_face_button = QtWidgets.QPushButton("Reset Face")
         self.auto_track_anchor_mode_input = QtWidgets.QComboBox()
         self.auto_track_anchor_mode_input.addItem("Head", "head")
         self.auto_track_anchor_mode_input.addItem("Half Body", "half_body")
@@ -241,6 +250,8 @@ class MainWindow(QtWidgets.QMainWindow):
         auto_track_controls.addWidget(QtWidgets.QLabel("Track"))
         auto_track_controls.addWidget(self.auto_track_toggle_button)
         auto_track_controls.addWidget(self.auto_track_use_zoom_input)
+        auto_track_controls.addWidget(self.auto_track_use_face_input)
+        auto_track_controls.addWidget(self.auto_track_reset_face_button)
         auto_track_controls.addWidget(QtWidgets.QLabel("Anchor"))
         auto_track_controls.addWidget(self.auto_track_anchor_mode_input)
         auto_track_controls.addWidget(self.auto_track_reset_button)
@@ -262,9 +273,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_track_status_label = QtWidgets.QLabel("Click a pose to select target.")
         self.auto_track_status_label.setStyleSheet("color: #000;")
         self.auto_track_status_label.setWordWrap(True)
-        auto_track_layout.addLayout(auto_track_controls)
-        auto_track_layout.addLayout(sensitivity_row)
-        auto_track_layout.addWidget(self.auto_track_status_label)
+        self.face_backend_status_label = QtWidgets.QLabel("Backend: Unknown")
+        self.face_backend_status_label.setStyleSheet("color: #000;")
+        self.face_learned_status_label = QtWidgets.QLabel("Learned: No")
+        self.face_learned_status_label.setStyleSheet("color: #000;")
+        self.face_state_text_label = QtWidgets.QLabel("Face recognition is off.")
+        self.face_state_text_label.setStyleSheet("color: #000;")
+        self.face_state_text_label.setWordWrap(True)
+        self.face_preview_label = QtWidgets.QLabel("No face learned")
+        self.face_preview_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.face_preview_label.setFixedSize(180, 135)
+        self.face_preview_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Fixed,
+            QtWidgets.QSizePolicy.Fixed,
+        )
+        self.face_preview_label.setStyleSheet(
+            "background-color: #111; color: #fff; border: 1px solid #666;"
+        )
+        auto_track_left = QtWidgets.QVBoxLayout()
+        auto_track_left.addLayout(auto_track_controls)
+        auto_track_left.addLayout(sensitivity_row)
+        auto_track_left.addWidget(self.face_backend_status_label)
+        auto_track_left.addWidget(self.face_learned_status_label)
+        auto_track_left.addWidget(self.face_state_text_label)
+        auto_track_left.addWidget(self.auto_track_status_label)
+
+        auto_track_right = QtWidgets.QVBoxLayout()
+        learned_face_title = QtWidgets.QLabel("Learned Face")
+        learned_face_title.setAlignment(QtCore.Qt.AlignCenter)
+        auto_track_right.addWidget(learned_face_title)
+        auto_track_right.addWidget(self.face_preview_label)
+        auto_track_right.addStretch(1)
+
+        auto_track_content = QtWidgets.QHBoxLayout()
+        auto_track_content.addLayout(auto_track_left, 1)
+        auto_track_content.addLayout(auto_track_right)
+        auto_track_layout.addLayout(auto_track_content)
 
         visca_layout.addWidget(QtWidgets.QLabel("VISCA IP"))
         visca_layout.addWidget(self.visca_address_input, 1)
@@ -487,6 +531,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_track_use_zoom_input.toggled.connect(
             lambda _checked: self._apply_visca_params(save=True)
         )
+        self.auto_track_use_face_input.toggled.connect(self._on_auto_track_use_face_toggled)
+        self.auto_track_reset_face_button.clicked.connect(self._on_auto_track_reset_face_clicked)
         self.auto_track_anchor_mode_input.currentIndexChanged.connect(
             self._on_auto_track_anchor_mode_changed
         )
@@ -506,6 +552,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._on_overlay_visibility_changed()
         self._on_auto_track_anchor_mode_changed()
+        self._on_auto_track_use_face_toggled(self.auto_track_use_face_input.isChecked())
         self._sync_energy_game_visibility_with_detection()
         self._update_auto_track_status()
 
@@ -547,6 +594,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_auto_track_reset_clicked(self) -> None:
         self.auto_tracker.reset_selection_to_zero()
         self.auto_tracker.stop_motion(ptz_speed=int(self.ptz_speed_slider.value()))
+        self._update_face_preview()
         self._update_auto_track_status(extra_text="Pose reset to 0. Click a pose to select target.")
 
     def _on_auto_track_anchor_mode_changed(self) -> None:
@@ -554,6 +602,53 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_tracker.set_anchor_mode(anchor_mode)
         self._apply_visca_params(save=True)
         self._update_auto_track_status()
+
+    def _on_auto_track_use_face_toggled(self, enabled: bool) -> None:
+        self.auto_tracker.set_use_face_recognition(bool(enabled))
+        self._apply_visca_params(save=True)
+        self._update_face_preview()
+        self._update_face_status_panel()
+
+    def _on_auto_track_reset_face_clicked(self) -> None:
+        self.auto_tracker.reset_face_data()
+        self._update_face_preview()
+        self._update_face_status_panel()
+
+    def _update_face_preview(self) -> None:
+        crop = self.auto_tracker.get_learned_face_crop()
+        if crop is None or getattr(crop, "size", 0) == 0:
+            self.face_preview_label.setText("No face learned")
+            self.face_preview_label.setPixmap(QtGui.QPixmap())
+            self._update_face_status_panel()
+            return
+        image = to_qimage_bgr(crop)
+        pixmap = QtGui.QPixmap.fromImage(image)
+        scaled = pixmap.scaled(
+            self.face_preview_label.size(),
+            QtCore.Qt.KeepAspectRatio,
+            QtCore.Qt.SmoothTransformation,
+        )
+        self.face_preview_label.setText("")
+        self.face_preview_label.setPixmap(scaled)
+        self._update_face_status_panel()
+
+    def _update_face_status_panel(self) -> None:
+        enabled = self.auto_track_use_face_input.isChecked()
+        if not enabled:
+            self.face_backend_status_label.setText("Backend: Disabled")
+            self.face_learned_status_label.setText("Learned: No")
+            self.face_state_text_label.setText("Face recognition is off.")
+            return
+        backend_error = self.face_recognizer.load_error
+        if backend_error:
+            self.face_backend_status_label.setText("Backend: Error")
+            self.face_state_text_label.setText(f"Error: {backend_error}")
+        else:
+            self.face_backend_status_label.setText("Backend: Ready")
+            self.face_state_text_label.setText(self.auto_tracker.get_face_status_text())
+        self.face_learned_status_label.setText(
+            "Learned: Yes" if self.auto_tracker.is_face_learned() else "Learned: No"
+        )
 
     def _on_overlay_visibility_changed(self) -> None:
         self.detector.set_overlay_visibility(
@@ -578,25 +673,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_pose_data_changed(self, pose_data: object) -> None:
         self.auto_tracker.update_pose_data(pose_data)
+        self._update_face_status_panel()
         self._update_auto_track_status()
 
     def _on_video_clicked(self, point: QtCore.QPoint) -> None:
         status_text = self.auto_tracker.select_from_click(point)
+        self._update_face_preview()
         if status_text:
             self.auto_track_status_label.setText(status_text)
         else:
             self._update_auto_track_status()
 
     def _auto_track_tick(self) -> None:
-        status_text = self.auto_tracker.tick(
-            enabled=self.auto_track_toggle_button.isChecked(),
-            use_zoom=self.auto_track_use_zoom_input.isChecked(),
-            sensitivity=int(self.auto_track_sensitivity_slider.value()),
-            ptz_speed=int(self.ptz_speed_slider.value()),
-            zoom_speed_limit=int(self.zoom_speed_slider.value()),
-        )
+        try:
+            status_text = self.auto_tracker.tick(
+                enabled=self.auto_track_toggle_button.isChecked(),
+                use_zoom=self.auto_track_use_zoom_input.isChecked(),
+                sensitivity=int(self.auto_track_sensitivity_slider.value()),
+                ptz_speed=int(self.ptz_speed_slider.value()),
+                zoom_speed_limit=int(self.zoom_speed_slider.value()),
+            )
+        except Exception as exc:
+            status_text = f"Auto-track error: {exc}"
+        self._update_face_status_panel()
         if status_text:
             self.auto_track_status_label.setText(status_text)
+            self._update_face_preview()
 
     def _update_auto_track_status(self, extra_text: str | None = None) -> None:
         if extra_text:
@@ -612,6 +714,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.video_label.setText("No video")
         self.video_label.setPixmap(QtGui.QPixmap())
         self.auto_tracker.set_frame_mapping(QtCore.QSize(), QtCore.QRect())
+        self.auto_tracker.set_latest_frame(None)
 
     def _game_params_from_config(self) -> GameParams:
         game_cfg = self.config.get("game", {})
@@ -678,6 +781,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "anchor_mode": str(
                     self.auto_track_anchor_mode_input.currentData() or "full_body"
                 ),
+                "use_face_recog": self.auto_track_use_face_input.isChecked(),
             },
         }
         if save:
@@ -956,6 +1060,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.stream_worker = StreamWorker(rtsp_url, self.detector, transport=transport)
         self.stream_worker.frame_ready.connect(self.update_frame)
+        self.stream_worker.raw_frame_changed.connect(self._on_raw_frame_changed)
         self.stream_worker.detected_changed.connect(self.detected_text.setPlainText)
         self.stream_worker.pose_data_changed.connect(self._on_pose_data_changed)
         self.stream_worker.waving_classes_changed.connect(self._on_waving_classes_changed)
@@ -972,6 +1077,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.latest_waving_counts = {cloth: 0 for cloth in CLOTH_ORDER}
         self.latest_shirt_counts = {cloth: 0 for cloth in CLOTH_ORDER}
         self.auto_tracker.clear_selection()
+        self._update_face_preview()
         self._update_auto_track_status()
         self.auto_tracker.stop_motion(ptz_speed=int(self.ptz_speed_slider.value()))
         if self.stream_worker and self.stream_worker.isRunning():
@@ -998,6 +1104,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
         )
 
+    def _on_raw_frame_changed(self, frame) -> None:
+        self.auto_tracker.set_latest_frame(frame)
+
     def handle_stream_error(self, message: str) -> None:
         self.status_label.setText(message)
         if self.stream_worker and self.stream_worker.isRunning():
@@ -1010,6 +1119,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.latest_waving_counts = {cloth: 0 for cloth in CLOTH_ORDER}
         self.latest_shirt_counts = {cloth: 0 for cloth in CLOTH_ORDER}
         self.auto_tracker.clear_selection()
+        self._update_face_preview()
         self._update_auto_track_status()
         self.detected_text.setPlainText("No detections")
         self.status_label.setText(
