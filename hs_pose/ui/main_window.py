@@ -15,6 +15,7 @@ from hs_pose.detector import YoloV5Detector
 from hs_pose.energy_game import CLOTH_ORDER, EnergyGameEngine, GameParams
 from hs_pose.face_recognizer import InsightFaceRecognizer
 from hs_pose.led_test_patterns import TEST_PALETTES, build_test_pixels
+from hs_pose.local_camera import available_cameras
 from hs_pose.sacn_sender import SacnSender
 from hs_pose.stream_worker import StreamWorker
 from hs_pose.ui.image_utils import to_qimage_bgr
@@ -36,7 +37,7 @@ class VideoLabel(QtWidgets.QLabel):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("HS Pose RTSP Viewer")
+        self.setWindowTitle("HS Pose Viewer")
         self.resize(1280, 860)
 
         self.config = load_config()
@@ -91,10 +92,18 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_layout = QtWidgets.QHBoxLayout()
         visca_layout = QtWidgets.QHBoxLayout()
 
-        rtsp_label = QtWidgets.QLabel("RTSP URL")
+        self.source_mode_input = QtWidgets.QComboBox()
+        self.source_mode_input.addItem("RTSP Stream", "rtsp")
+        self.source_mode_input.addItem("Local Camera", "camera")
+        source_mode_index = self.source_mode_input.findData(self.config.get("source_mode", "rtsp"))
+        self.source_mode_input.setCurrentIndex(max(0, source_mode_index))
+        self.source_label = QtWidgets.QLabel("RTSP URL")
         self.rtsp_input = QtWidgets.QLineEdit(self.config["rtsp_url"])
         self.rtsp_input.setPlaceholderText("rtsp://host:port/path")
-        transport_label = QtWidgets.QLabel("Transport")
+        self.camera_input = QtWidgets.QComboBox()
+        self.refresh_cameras_button = QtWidgets.QPushButton("Refresh Cameras")
+        self._refresh_cameras()
+        self.transport_label = QtWidgets.QLabel("Transport")
         self.transport_input = QtWidgets.QComboBox()
         self.transport_input.addItem("TCP", "tcp")
         self.transport_input.addItem("Auto", "auto")
@@ -121,9 +130,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_energy_game_input = QtWidgets.QCheckBox("Show Energy Game")
         self.show_energy_game_input.setChecked(True)
 
-        controls_layout.addWidget(rtsp_label)
+        controls_layout.addWidget(QtWidgets.QLabel("Source"))
+        controls_layout.addWidget(self.source_mode_input)
+        controls_layout.addWidget(self.source_label)
         controls_layout.addWidget(self.rtsp_input, 1)
-        controls_layout.addWidget(transport_label)
+        controls_layout.addWidget(self.camera_input, 1)
+        controls_layout.addWidget(self.refresh_cameras_button)
+        controls_layout.addWidget(self.transport_label)
         controls_layout.addWidget(self.transport_input)
         controls_layout.addWidget(confidence_label)
         controls_layout.addWidget(self.confidence_input)
@@ -330,6 +343,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_label_overlay_input.setChecked(True)
         self.show_pose_overlay_input = QtWidgets.QCheckBox("Show Pose")
         self.show_pose_overlay_input.setChecked(True)
+        self.hide_video_input = QtWidgets.QCheckBox("Hide Video")
+        self.hide_video_input.setChecked(bool(self.config.get("hide_video", False)))
         self.detected_text = QtWidgets.QPlainTextEdit()
         self.detected_text.setReadOnly(True)
         self.detected_text.setMinimumWidth(260)
@@ -355,6 +370,7 @@ class MainWindow(QtWidgets.QMainWindow):
         detected_toggle_layout = QtWidgets.QHBoxLayout()
         detected_toggle_layout.addWidget(self.show_label_overlay_input)
         detected_toggle_layout.addWidget(self.show_pose_overlay_input)
+        detected_toggle_layout.addWidget(self.hide_video_input)
         detected_toggle_layout.addStretch(1)
         detected_layout.addLayout(detected_toggle_layout)
         detected_layout.addWidget(self.detected_text, 1)
@@ -489,6 +505,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.start_button.clicked.connect(self.start_stream)
         self.stop_button.clicked.connect(self.stop_stream)
+        self.source_mode_input.currentIndexChanged.connect(self._update_source_controls)
+        self.refresh_cameras_button.clicked.connect(self._refresh_cameras)
         self.apply_game_button.clicked.connect(lambda: self._apply_all_settings(save=True))
         self.reset_energy_button.clicked.connect(self._reset_energy)
         self.use_camera_button.clicked.connect(self._use_camera_for_visca)
@@ -547,14 +565,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hs_weight_detection_input.toggled.connect(self._on_hs_weight_detection_toggled)
         self.show_label_overlay_input.toggled.connect(self._on_overlay_visibility_changed)
         self.show_pose_overlay_input.toggled.connect(self._on_overlay_visibility_changed)
+        self.hide_video_input.toggled.connect(self._on_hide_video_toggled)
         self.auto_track_toggle_button.setText(
             "On" if self.auto_track_toggle_button.isChecked() else "Off"
         )
         self._on_overlay_visibility_changed()
+        self.detector.set_hide_video(self.hide_video_input.isChecked())
         self._on_auto_track_anchor_mode_changed()
         self._on_auto_track_use_face_toggled(self.auto_track_use_face_input.isChecked())
         self._sync_energy_game_visibility_with_detection()
         self._update_auto_track_status()
+        self._update_source_controls()
+
+    def _refresh_cameras(self) -> None:
+        """Populate the local-camera selector without changing a valid selection."""
+        selected_index = self.camera_input.currentData()
+        if selected_index is None:
+            selected_index = self.config.get("camera_index", 0)
+
+        self.camera_input.clear()
+        cameras = available_cameras()
+        if not cameras:
+            self.camera_input.addItem("No cameras found", None)
+            return
+
+        for index, name in cameras:
+            self.camera_input.addItem(name, index)
+
+        selected_position = self.camera_input.findData(int(selected_index))
+        self.camera_input.setCurrentIndex(max(0, selected_position))
+
+    def _update_source_controls(self) -> None:
+        is_camera = self.source_mode_input.currentData() == "camera"
+        self.source_label.setVisible(not is_camera)
+        self.rtsp_input.setVisible(not is_camera)
+        self.transport_input.setVisible(not is_camera)
+        self.camera_input.setVisible(is_camera)
+        self.refresh_cameras_button.setVisible(is_camera)
+
+        self.transport_label.setVisible(not is_camera)
 
     def _on_auto_track_sensitivity_changed(self, value: int) -> None:
         self.auto_track_sensitivity_value.setText(str(int(value)))
@@ -655,6 +704,11 @@ class MainWindow(QtWidgets.QMainWindow):
             show_labels=self.show_label_overlay_input.isChecked(),
             show_pose=self.show_pose_overlay_input.isChecked(),
         )
+
+    def _on_hide_video_toggled(self, enabled: bool) -> None:
+        self.detector.set_hide_video(enabled)
+        self.config["hide_video"] = bool(enabled)
+        save_config(self.config)
 
     def _on_hs_weight_detection_toggled(self, enabled: bool) -> None:
         self.detector.set_hs_weight_detection_enabled(bool(enabled))
@@ -1040,9 +1094,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.energy_status_label.setText(" | ".join(parts))
 
     def start_stream(self) -> None:
+        source_mode = self.source_mode_input.currentData() or "rtsp"
         rtsp_url = self.rtsp_input.text().strip()
-        if not rtsp_url:
+        camera_index = self.camera_input.currentData()
+        if source_mode == "rtsp" and not rtsp_url:
             QtWidgets.QMessageBox.warning(self, "Missing URL", "Enter an RTSP URL.")
+            return
+        if source_mode == "camera" and camera_index is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Missing Camera", "Connect a camera and click Refresh Cameras."
+            )
             return
 
         confidence = self.confidence_input.value()
@@ -1051,14 +1112,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_all_settings(save=False)
 
         self.config["rtsp_url"] = rtsp_url
+        self.config["source_mode"] = source_mode
+        self.config["camera_index"] = int(camera_index or 0)
         self.config["confidence"] = confidence
         self.config["transport"] = transport
         self.config["hs_weight_detection_enabled"] = self.hs_weight_detection_input.isChecked()
+        self.config["hide_video"] = self.hide_video_input.isChecked()
         save_config(self.config)
 
         self.stop_stream()
 
-        self.stream_worker = StreamWorker(rtsp_url, self.detector, transport=transport)
+        source = int(camera_index) if source_mode == "camera" else rtsp_url
+        self.stream_worker = StreamWorker(
+            source, self.detector, transport=transport, source_mode=source_mode
+        )
         self.stream_worker.frame_ready.connect(self.update_frame)
         self.stream_worker.raw_frame_changed.connect(self._on_raw_frame_changed)
         self.stream_worker.detected_changed.connect(self.detected_text.setPlainText)

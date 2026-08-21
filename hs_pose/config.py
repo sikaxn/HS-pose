@@ -12,9 +12,12 @@ from hs_pose.constants import (
 def load_config() -> dict:
     default_config = {
         "rtsp_url": DEFAULT_RTSP_URL,
+        "source_mode": "rtsp",
+        "camera_index": 0,
         "confidence": DEFAULT_CONFIDENCE,
         "transport": DEFAULT_RTSP_TRANSPORT,
         "hs_weight_detection_enabled": True,
+        "hide_video": False,
         "game": {
             "pixel_count": 120,
             "charge_rate": 1.0,
@@ -68,12 +71,20 @@ def load_config() -> dict:
     transport = str(data.get("transport", DEFAULT_RTSP_TRANSPORT)).lower()
     if transport not in {"auto", "tcp", "udp"}:
         transport = DEFAULT_RTSP_TRANSPORT
+    source_mode = str(data.get("source_mode", "rtsp")).lower()
+    if source_mode not in {"rtsp", "camera"}:
+        source_mode = "rtsp"
+    try:
+        camera_index = max(0, int(data.get("camera_index", 0)))
+    except (TypeError, ValueError):
+        camera_index = 0
     hs_weight_detection_enabled = bool(
         data.get(
             "hs_weight_detection_enabled",
             default_config["hs_weight_detection_enabled"],
         )
     )
+    hide_video = bool(data.get("hide_video", default_config["hide_video"]))
 
     game_data = data.get("game", {})
     if not isinstance(game_data, dict):
@@ -213,9 +224,12 @@ def load_config() -> dict:
 
     return {
         "rtsp_url": data.get("rtsp_url") or DEFAULT_RTSP_URL,
+        "source_mode": source_mode,
+        "camera_index": camera_index,
         "confidence": confidence,
         "transport": transport,
         "hs_weight_detection_enabled": hs_weight_detection_enabled,
+        "hide_video": hide_video,
         "game": {
             "pixel_count": pixel_count,
             "charge_rate": charge_rate,

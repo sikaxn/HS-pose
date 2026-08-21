@@ -69,6 +69,7 @@ class YoloV5Detector:
         self.hs_weight_detection_enabled = True
         self.show_label_overlay = True
         self.show_pose_overlay = True
+        self.hide_video = False
         self.selected_anchor_mode = "full_body"
         self._tracks = {}
         self._next_track_id = 1
@@ -93,6 +94,10 @@ class YoloV5Detector:
         self.show_label_overlay = bool(show_labels)
         self.show_pose_overlay = bool(show_pose)
 
+    def set_hide_video(self, hide_video: bool) -> None:
+        """Draw overlays on a black canvas while still inferring from the live frame."""
+        self.hide_video = bool(hide_video)
+
     def set_selected_anchor_mode(self, mode: str) -> None:
         normalized = str(mode).strip().lower()
         if normalized not in {"head", "half_body", "full_body"}:
@@ -109,6 +114,8 @@ class YoloV5Detector:
             results = self.model(rgb_frame, size=640)
             detections = results.xyxy[0].detach().cpu().numpy()
         annotated = frame.copy()
+        if self.hide_video:
+            annotated.fill(0)
         shirt_detections = []
         shirt_by_class = {}
         detected_items = []

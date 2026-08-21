@@ -6,6 +6,7 @@ from PyQt5 import QtCore, QtGui
 from hs_pose.constants import FRAME_WAIT_TIMEOUT_MS
 from hs_pose.frame_buffer import LatestFrameBuffer
 from hs_pose.gstreamer import GstRtspCapture
+from hs_pose.local_camera import LocalCameraCapture
 from hs_pose.ui.image_utils import to_qimage_bgr
 
 
@@ -19,12 +20,23 @@ class StreamWorker(QtCore.QThread):
     status_changed = QtCore.pyqtSignal(str)
     error_occurred = QtCore.pyqtSignal(str)
 
-    def __init__(self, rtsp_url: str, detector, transport: str = "tcp") -> None:
+    def __init__(
+        self,
+        source: str | int,
+        detector,
+        transport: str = "tcp",
+        source_mode: str = "rtsp",
+    ) -> None:
         super().__init__()
-        self.rtsp_url = rtsp_url
+        self.source = source
+        self.source_mode = source_mode
         self.detector = detector
         self.frame_buffer = LatestFrameBuffer()
-        self.capture = GstRtspCapture(rtsp_url, preferred_transport=transport)
+        self.capture = (
+            LocalCameraCapture(int(source))
+            if source_mode == "camera"
+            else GstRtspCapture(str(source), preferred_transport=transport)
+        )
         self._running = False
         self._capture_thread = None
         self._capture_fps = 0.0
@@ -44,7 +56,8 @@ class StreamWorker(QtCore.QThread):
     def run(self) -> None:
         self._running = True
         try:
-            self.status_changed.emit(f"Connecting to {self.rtsp_url}")
+            source_label = f"camera {self.source}" if self.source_mode == "camera" else self.source
+            self.status_changed.emit(f"Connecting to {source_label}")
             self.capture.start()
         except Exception as exc:
             self.error_occurred.emit(str(exc))
